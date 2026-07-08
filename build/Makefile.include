@@ -1,0 +1,46 @@
+# Makefile.include — Common cross-compilation configuration
+#
+# Target: AR.Drone 2.0 / TI OMAP3530 (Cortex-A8, NEON)
+# Toolchain prefix: arm-linux-gnueabihf- (2016.02-linaro)
+# Host: Docker (recommended), macOS, or Linux
+#
+# Toolchain paths — adjust to your installation
+TOOLCHAIN_PATH  ?= /opt/arm-2016.02-linaro/bin
+SYSROOT_PATH    ?= /opt/arm-2016.02-linaro/arm-linux-gnueabihf/libc
+
+# Tools
+CC          = arm-linux-gnueabihf-gcc
+CXX         = arm-linux-gnueabihf-g++
+AR          = arm-linux-gnueabihf-ar
+STRIP       = arm-linux-gnueabihf-strip
+SIZE        = arm-linux-gnueabihf-size
+OBJDUMP     = arm-linux-gnueabihf-objdump
+
+# Architecture flags
+ARCH_CFLAGS   := -mcpu=cortex-a8 -mfloat-abi=hard -mfpu=neon -std=gnu99
+OPT_CFLAGS    := -Os -fomit-frame-pointer -ffunction-sections -fdata-sections
+WARN_CFLAGS   := -Wall -Wextra -Wno-unused-parameter
+
+# GStreamer flags (0.10) — define BEFORE CFLAGS
+GST_CFLAGS    := -idirafter /usr/include $(shell pkg-config --cflags gstreamer-0.10 gstreamer-base-0.10 2>/dev/null || \
+                  echo "-I$(SYSROOT_PATH)/usr/include/gstreamer-0.10 -I$(SYSROOT_PATH)/usr/include/glib-2.0 -I$(SYSROOT_PATH)/usr/lib/glib-2.0/include")
+GST_LIBS      := $(shell pkg-config --libs gstreamer-0.10 gstreamer-base-0.10 2>/dev/null || \
+                  echo "-lgstreamer-0.10 -lgstbase-0.10 -lglib-2.0 -lgobject-2.0 -lgmodule-2.0 -lgthread-2.0")
+
+# TI Codec Engine / XDAIS paths
+TI_SYSROOT    ?= ../build/sysroot/ti/packages
+
+CFLAGS        := $(ARCH_CFLAGS) $(OPT_CFLAGS) $(WARN_CFLAGS) \
+                 -I$(SYSROOT_PATH)/usr/include -I../src \
+                 -I$(TI_SYSROOT) \
+                 -include $(TI_SYSROOT)/std.h \
+                 -DUSE_TI_CODEC_ENGINE \
+                 $(GST_CFLAGS)
+LDFLAGS       := -static-libgcc -L$(SYSROOT_PATH)/lib \
+                 -Wl,--gc-sections -Wl,-rpath-link,$(SYSROOT_PATH)/lib
+
+# V4L2 flags
+V4L2_CFLAGS   := $(shell pkg-config --cflags libv4l2 2>/dev/null || \
+                  echo "-I$(SYSROOT_PATH)/usr/include")
+V4L2_LIBS     := $(shell pkg-config --libs libv4l2 2>/dev/null || \
+                  echo "-lv4l2")

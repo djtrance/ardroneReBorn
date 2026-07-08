@@ -1,0 +1,7 @@
+build/bin/
+build/obj/
+*.o
+*.swp
+*.swo
+.DS_Store
+build/sysroot/ti/
