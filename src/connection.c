@@ -134,10 +134,8 @@ int ardrone_recv_navdata(ardrone_connection_t *conn, ardrone_navdata_t *nav, int
     int offset = 16;
 
     while (offset + 4 < n) {
-        int tag = buffer[offset] | (buffer[offset + 1] << 8) |
-                  (buffer[offset + 2] << 16) | (buffer[offset + 3] << 24);
-        int size = buffer[offset + 4] | (buffer[offset + 5] << 8) |
-                   (buffer[offset + 6] << 16) | (buffer[offset + 7] << 24);
+        int tag = buffer[offset] | (buffer[offset + 1] << 8);
+        int size = buffer[offset + 2] | (buffer[offset + 3] << 8);
 
         if (tag == ARDRONE_NAVDATA_DEMO_TAG && (unsigned int)size >= sizeof(ardrone_navdata_demo_t)) {
             ardrone_navdata_demo_t *demo = (ardrone_navdata_demo_t *)&buffer[offset];

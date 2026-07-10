@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
 # Installs to /opt/arm-2016.02-linaro/bin/
 ARG TC_DEB=parrot-tools-linuxgnutools-2016.02-linaro_1.0.0-2_amd64.deb
 ARG TC_URL=https://github.com/tudelft/toolchains/raw/master/${TC_DEB}
-ENV PATH="/opt/arm-2016.02-linaro/bin:${PATH}"
+ENV PATH="/opt/arm-2012.03/bin:/opt/arm-2016.02-linaro/bin:${PATH}"
 
 RUN wget -q "${TC_URL}" -O "/tmp/${TC_DEB}" \
     && dpkg -i "/tmp/${TC_DEB}" 2>/dev/null; \
@@ -27,6 +27,19 @@ RUN wget -q "${TC_URL}" -O "/tmp/${TC_DEB}" \
     echo "*** Fix: create stubs-soft.h symlink for softfp builds ***"; \
     SYSROOT=/opt/arm-2016.02-linaro/arm-linux-gnueabihf/libc; \
     ln -sf stubs-hard.h $SYSROOT/usr/include/gnu/stubs-soft.h
+
+# Soft-float toolchain (Parrot 2012.03, arm-none-linux-gnueabi-)
+# Used for on-drone standalone test programs; produces binaries for kernel >= 2.6.16
+# which runs on the drone's 2.6.32.9 kernel without "FATAL: kernel too old" errors
+ARG TC_OLD=parrot-tools-linuxgnutools-2012.03_1.0.0-3_i386.deb
+ARG TC_OLD_URL=https://github.com/tudelft/toolchains/raw/master/${TC_OLD}
+RUN dpkg --add-architecture i386 && apt-get update && apt-get install -y libc6:i386; \
+    wget -q "${TC_OLD_URL}" -O "/tmp/${TC_OLD}" && \
+    dpkg -i "/tmp/${TC_OLD}" 2>/dev/null; \
+    apt-get install -fy; \
+    rm -f "/tmp/${TC_OLD}"; \
+    export PATH="/opt/arm-2012.03/bin:${PATH}"; \
+    arm-none-linux-gnueabi-gcc --version
 
 # GStreamer 0.10 — download .debs from snapshot.debian.org
 # (removed from modern distro repos; last available on Debian 10)

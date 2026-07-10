@@ -313,3 +313,67 @@ FRAME  FX       FY       QUAL   LOOM   ASYM   CONF
 - DSP can only run ONE encode session; no multitasking on DSP side
 - `/data` is persistent storage; `/opt` is tmpfs — mount bind from `/data/video/opt` to `/opt`
 - Always `chmod 777` uploaded binaries before execution
+
+## Drone System Information (AR.Drone 2.0)
+
+### OS & Kernel
+- Linux 2.6.32.9-g980dab2 (custom Parrot build)
+- Build: `/home/stephane/.ardrone/linux/ardrone2_ARDrone2_Version_20130102/`
+- BusyBox v1.14.0
+
+### Toolchain & Libraries
+- glibc 2.11.1 (soft-float ABI, `/lib/ld-linux.so.3` linker)
+- C++: libstdc++ 6.0.14 (from `libstdc++.so.6.0.14`)
+- gcc used by kernel: Sourcery G++ Lite 2010.09-50
+- libc files: `libc-2.11.1.so`, `ld-2.11.1.so`, `libm-2.11.1.so`, `libpthread-2.11.1.so`, `librt-2.11.1.so`, `libdl-2.11.1.so`, `libnss_dns-2.11.1.so`, `libnss_files-2.11.1.so`
+- Other libs: `libiw.so.29` (wireless), `libusb-1.0.so`, `libusb-0.1.so`, `libz.so.1.2.3`, `libexif.so.12.3.2`, `libproc-3.2.8.so`
+
+### Devices
+- **Video**: 7 camera devices `/dev/video0`–`/dev/video6` (via omap3_isp)
+- **I2C**: 3 buses (`/dev/i2c-1`, `/dev/i2c-2`, `/dev/i2c-3`)
+- **DSP**: `/dev/DspBridge` (character device 247)
+- **USB**: 1 x usb-ohci, SD card reader on musb_hdrc
+- No `dsp`, `fb`, or `ttyUSB` by default
+
+### Kernel Modules
+- `ov7670` — front camera sensor driver
+- `soc1040` — bottom camera sensor driver
+- `omap3_isp` — OMAP3 Image Signal Processor
+- `ar6000` — Atheros AR6003 WiFi
+
+### Storage
+- `/data` — persistent flash (FAT, approx 4 GB `mmcblk0`)
+- `/opt` — tmpfs (bind-mounted from `/data/video/opt/arm` at boot)
+- NAND: 5 MTD partitions (mtd0–mtd4) with UBIFS (ubi0–ubi2)
+
+### Important Build Notes
+
+#### "FATAL: kernel too old" Fix
+This error occurs when a statically-linked binary built with a modern glibc (≥2.31, Ubuntu 22.04's `arm-linux-gnueabi`) runs on the drone's 2.6.32.9 kernel. The glibc checks `uname()` at startup and refuses to run if the kernel is older than its `--enable-kernel` target (typically 3.2.0 for modern distros).
+
+**Solution**: Use the **Parrot 2012.03 soft-float toolchain** (`arm-none-linux-gnueabi-`, kernel min 2.6.16):
+
+```makefile
+SOFT_CC = /opt/arm-2012.03/bin/arm-none-linux-gnueabi-gcc
+SOFT_CFLAGS = -mcpu=cortex-a8 -mfloat-abi=soft -std=gnu99
+SOFT_LDFLAGS = -static -static-libgcc -lm -lrt -Wl,--gc-sections
+```
+
+Produces: `statically linked, for GNU/Linux 2.6.16` — runs on drone's 2.6.32.9.
+
+#### Segfault Isolation
+If a test binary segfaults on the drone, start with `test_minimal`:
+```
+Usage: test_minimal
+```
+It only prints "Hello from drone!" and creates a UDP socket. If this works, the issue is in the test program code, not the toolchain.
+
+#### Test Programs vs. GStreamer Plugin
+- On-drone test programs (`test_connection`, `test_camera`, etc.) use the **soft-float** toolchain and must be **statically linked**.
+- The H.264 encoder pipeline (`drone_encoder`, `libgstparrot_enc.so`) uses the **hard-float** toolchain (Linaro 2016.02) with TI Codec Engine undefined symbols resolved at runtime.
+
+### Known Quirks
+- `/lib/dsp/` does NOT exist on the drone by default — DSP libraries must be uploaded as part of `/data/video/opt/arm/lib/dsp/`
+- `/opt/arm/tidsp-binaries*` does NOT exist by default — DSP firmware must be uploaded and bind-mounted
+- `/opt/arm/gst/` does NOT exist by default — GStreamer ARM binaries must be uploaded
+- USB camera detected (`Sonix Technology Co., Ltd. ID 0c45:6366`) but no UVC driver in kernel — won't appear as `/dev/video*`

@@ -95,8 +95,13 @@ $(BIN_DIR)/test_stream: $(TEST_STREAM_SRCS) | $(BIN_DIR)
 	$(SOFT_CC) $(SOFT_CFLAGS) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS)
 	@echo "=== Built: $@ ==="
 
+# test_minimal: minimal hello world to verify toolchain works on drone
+$(BIN_DIR)/test_minimal: $(TEST_DIR)/test_minimal.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) $^ -o $@ $(SOFT_LDFLAGS)
+	@echo "=== Built: $@ ==="
+
 # Build all test programs
-tests: $(BIN_DIR)/test_connection $(BIN_DIR)/test_camera $(BIN_DIR)/test_vision $(BIN_DIR)/test_stream
+tests: $(BIN_DIR)/test_minimal $(BIN_DIR)/test_connection $(BIN_DIR)/test_camera $(BIN_DIR)/test_vision $(BIN_DIR)/test_stream
 
 # Size stats
 size: $(TARGET)
