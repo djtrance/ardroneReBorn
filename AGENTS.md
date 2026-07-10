@@ -198,6 +198,114 @@ gst-launch-0.10 v4l2src device=/dev/video0 ! \
 - Code uses XDM 0.9 compatibility (`XDM_INCLUDE_DOT9_SUPPORT`), supported by header include order.
 - All three binaries (drone_encoder, dsp_init, libgstparrot_enc.so) carry undefined TI CE symbols (`Engine_open`, `VIDENC_create`, etc.) resolved at runtime. The drone must have `libti_ce.so` in its library path.
 
+## On-Drone Test Programs
+
+Build with cross-compiler (via Docker):
+
+```bash
+cd build && ./docker-run.sh
+make tests    # builds all test programs
+```
+
+Three test programs in `build/bin/`:
+
+| Program | Source | What it tests | Run on drone |
+|---------|--------|---------------|--------------|
+| `test_connection` | `src/tests/test_connection.c` | AT commands + navdata (battery, altitude, angles) | `./test_connection [ip]` |
+| `test_camera` | `src/tests/test_camera.c` | V4L2 capture (resolution, FPS, brightness) | `./test_camera [dev] [w] [h] [frames]` |
+| `test_vision` | `src/tests/test_vision.c` | Camera + Stage 1 flow + obstacle detection | `./test_vision [dev] [frames]` |
+| `test_stream` | `src/tests/test_stream.c` | Camera + flow + obstacle + UDP stream to ground station | `./test_stream [dev] [host-ip] [port] [frames]` |
+
+Deploy any binary with:
+
+```bash
+cd tools && ./deploy.sh ../build/bin/test_vision 192.168.1.1
+```
+
+Then telnet to drone and run:
+
+```bash
+telnet 192.168.1.1
+/data/video/test_vision /dev/video0 300
+```
+
+### test_connection
+
+```
+Usage: test_connection [drone-ip]
+```
+
+Connects to the drone, sends AT*CONFIG to enable navdata, and prints battery%, altitude, velocity, and heading every navdata packet.
+
+Output:
+```
+batt%  alt(cm)  vx       vy       vz       heading
+68     52       0        0        0        -1
+68     53       0        1        0        -1
+```
+
+### test_camera
+
+```
+Usage: test_camera [device] [width] [height] [frames]
+```
+
+Opens the V4L2 camera device, captures N frames at the requested resolution, and prints per-frame capture time and average FPS.
+
+Output:
+```
+Camera: /dev/video0
+Actual: 320x240
+Frame   0: 307200 bytes, avg_brightness=112, capture_time=15234 us
+...
+Stats: 100 frames, avg 15210 us/frame (65.7 FPS)
+```
+
+### test_vision
+
+```
+Usage: test_vision [device] [frames]
+```
+
+Full vision pipeline test: captures grayscale frames, runs Stage 1 optical flow (SAD block matching) and obstacle detection (looming + asymmetry + vertical line). Outputs frame-by-frame results:
+
+Output:
+```
+Camera: 320x240
+
+fr   flow_x     flow_y     qual   loom    asym     conf
+---- ---------- ---------- ------ ------- -------- -------
+0    +12        -3         200    0       0        0
+10   +10        -2         212    15      0        45
+...
+```
+
+### test_stream
+
+```
+Usage: test_stream [device] [host-ip] [port] [frames]
+```
+
+Full vision pipeline with live video streaming to ground station: captures grayscale frames, runs Stage 1 optical flow and obstacle detection, draws overlay (flow arrow, looming bar, asymmetry indicator, vertical line), and sends frames over UDP to a ground station.
+
+The host receiver (`tools/video_receiver`) displays the video with the same overlays:
+
+```bash
+# Terminal 1 (host): start receiver
+make -C tools/simulator video_receiver && ./tools/simulator/video_receiver 9090
+
+# Terminal 2 (telnet to drone): start stream
+/data/video/test_stream /dev/video0 192.168.1.2 9090 300
+```
+
+Output on drone:
+```
+Streaming to 192.168.1.2:9090
+FRAME  FX       FY       QUAL   LOOM   ASYM   CONF
+0         +12       -3      200     0      0      0
+10        +10       -2      212     15     0     45
+```
+
 ## Critical Gotchas
 
 - **GStreamer 0.10**, not 1.x — plugin API differs, check version in includes

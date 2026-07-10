@@ -17,7 +17,7 @@ SIZE        = arm-linux-gnueabihf-size
 OBJDUMP     = arm-linux-gnueabihf-objdump
 
 # Architecture flags
-ARCH_CFLAGS   := -mcpu=cortex-a8 -mfloat-abi=hard -mfpu=neon -std=gnu99
+ARCH_CFLAGS   := -mcpu=cortex-a8 -mfloat-abi=hard -mfpu=neon -marm -std=gnu99
 OPT_CFLAGS    := -Os -fomit-frame-pointer -ffunction-sections -fdata-sections
 WARN_CFLAGS   := -Wall -Wextra -Wno-unused-parameter
 
@@ -36,7 +36,7 @@ CFLAGS        := $(ARCH_CFLAGS) $(OPT_CFLAGS) $(WARN_CFLAGS) \
                  -include $(TI_SYSROOT)/std.h \
                  -DUSE_TI_CODEC_ENGINE \
                  $(GST_CFLAGS)
-LDFLAGS       := -static-libgcc -L$(SYSROOT_PATH)/lib \
+LDFLAGS       := -static-libgcc -L$(SYSROOT_PATH)/lib -lm \
                  -Wl,--gc-sections -Wl,-rpath-link,$(SYSROOT_PATH)/lib
 
 # V4L2 flags
