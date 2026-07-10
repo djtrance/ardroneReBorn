@@ -49,7 +49,7 @@ V4L2_LIBS     := $(shell pkg-config --libs libv4l2 2>/dev/null || \
 # Matches drone's glibc 2.11 + kernel 2.6.32 ABI (produces binaries for GNU/Linux 2.6.16)
 SOFT_CC_PATH  ?= /opt/arm-2012.03/bin
 SOFT_CC       := $(SOFT_CC_PATH)/arm-none-linux-gnueabi-gcc
-SOFT_ARCH_CFLAGS := -mcpu=cortex-a8 -mfloat-abi=soft -std=gnu99
+SOFT_ARCH_CFLAGS := -march=armv7-a -mtune=cortex-a8 -mfpu=neon -mfloat-abi=softfp -ftree-vectorize -std=gnu99
 SOFT_CFLAGS   := $(SOFT_ARCH_CFLAGS) $(OPT_CFLAGS) $(WARN_CFLAGS) \
                  -I../src -I../src/vision
 SOFT_LDFLAGS  := -static -static-libgcc -lm -lrt -Wl,--gc-sections
