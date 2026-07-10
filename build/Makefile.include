@@ -52,4 +52,4 @@ SOFT_CC       := $(SOFT_CC_PATH)/arm-none-linux-gnueabi-gcc
 SOFT_ARCH_CFLAGS := -mcpu=cortex-a8 -mfloat-abi=soft -std=gnu99
 SOFT_CFLAGS   := $(SOFT_ARCH_CFLAGS) $(OPT_CFLAGS) $(WARN_CFLAGS) \
                  -I../src -I../src/vision
-SOFT_LDFLAGS  := -static -static-libgcc -lm -Wl,--gc-sections
+SOFT_LDFLAGS  := -static -static-libgcc -lm -lrt -Wl,--gc-sections
