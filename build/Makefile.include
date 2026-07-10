@@ -45,8 +45,10 @@ V4L2_CFLAGS   := $(shell pkg-config --cflags libv4l2 2>/dev/null || \
 V4L2_LIBS     := $(shell pkg-config --libs libv4l2 2>/dev/null || \
                   echo "-lv4l2")
 
-# Soft-float toolchain for on-drone test programs (matches drone's soft-float ABI)
-SOFT_CC       := arm-linux-gnueabi-gcc
+# Soft-float toolchain for on-drone test programs (Parrot 2012.03, Sourcery G++ Lite 4.6.3)
+# Matches drone's glibc 2.11 + kernel 2.6.32 ABI (produces binaries for GNU/Linux 2.6.16)
+SOFT_CC_PATH  ?= /opt/arm-2012.03/bin
+SOFT_CC       := $(SOFT_CC_PATH)/arm-none-linux-gnueabi-gcc
 SOFT_ARCH_CFLAGS := -mcpu=cortex-a8 -mfloat-abi=soft -std=gnu99
 SOFT_CFLAGS   := $(SOFT_ARCH_CFLAGS) $(OPT_CFLAGS) $(WARN_CFLAGS) \
                  -I../src -I../src/vision
