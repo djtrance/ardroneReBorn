@@ -66,53 +66,33 @@ $(H264_INIT_TARGET): $(DSP_INIT_OBJS) | $(BIN_DIR)
 dsp_init: $(H264_INIT_TARGET)
 
 # === On-drone test programs ===
-# Static linking avoids dynamic linker mismatch with drone's firmware
-TEST_LDFLAGS := -static $(LDFLAGS)
+# Soft-float toolchain + static linking matches drone's soft-float ABI.
+# Each test compiles all its sources in one pass to avoid mixing hard/soft float .o files.
 
-TEST_LIBS := $(OBJ_DIR)/connection.o $(OBJ_DIR)/video_capture.o $(VISION_OBJS)
-
-# test_connection: connection test (AT commands + navdata)
-TEST_CONN_OBJS := $(OBJ_DIR)/tests/test_connection.o $(OBJ_DIR)/connection.o
-$(OBJ_DIR)/tests/test_connection.o: $(TEST_DIR)/test_connection.c | $(OBJ_DIR)
-	mkdir -p $(OBJ_DIR)/tests
-	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(SRC_DIR) -c $< -o $@
-
-$(BIN_DIR)/test_connection: $(TEST_CONN_OBJS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(TEST_CONN_OBJS) -o $@ $(TEST_LDFLAGS)
-	$(STRIP) $@
+# test_connection: AT commands + navdata
+$(BIN_DIR)/test_connection: $(TEST_DIR)/test_connection.c $(SRC_DIR)/connection.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS)
 	@echo "=== Built: $@ ==="
 
-# test_camera: V4L2 capture test
-TEST_CAM_OBJS := $(OBJ_DIR)/tests/test_camera.o $(OBJ_DIR)/video_capture.o
-$(OBJ_DIR)/tests/test_camera.o: $(TEST_DIR)/test_camera.c | $(OBJ_DIR)
-	mkdir -p $(OBJ_DIR)/tests
-	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(SRC_DIR) -c $< -o $@
-
-$(BIN_DIR)/test_camera: $(TEST_CAM_OBJS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(TEST_CAM_OBJS) -o $@ $(TEST_LDFLAGS)
-	$(STRIP) $@
+# test_camera: V4L2 capture
+$(BIN_DIR)/test_camera: $(TEST_DIR)/test_camera.c $(SRC_DIR)/video_capture.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS)
 	@echo "=== Built: $@ ==="
 
 # test_vision: camera + flow + obstacle
-TEST_VISION_OBJS := $(OBJ_DIR)/tests/test_vision.o $(OBJ_DIR)/video_capture.o $(VISION_OBJS)
-$(OBJ_DIR)/tests/test_vision.o: $(TEST_DIR)/test_vision.c | $(OBJ_DIR)
-	mkdir -p $(OBJ_DIR)/tests
-	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(SRC_DIR) -c $< -o $@
-
-$(BIN_DIR)/test_vision: $(TEST_VISION_OBJS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(TEST_VISION_OBJS) -o $@ $(TEST_LDFLAGS)
-	$(STRIP) $@
+TEST_VISION_SRCS := $(TEST_DIR)/test_vision.c $(SRC_DIR)/video_capture.c \
+                    $(VISION_DIR)/image.c $(VISION_DIR)/pattern.c \
+                    $(VISION_DIR)/flow_stage1.c $(VISION_DIR)/obstacle.c
+$(BIN_DIR)/test_vision: $(TEST_VISION_SRCS) | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS)
 	@echo "=== Built: $@ ==="
 
 # test_stream: camera + flow + obstacle + UDP stream
-TEST_STREAM_OBJS := $(OBJ_DIR)/tests/test_stream.o $(OBJ_DIR)/video_capture.o $(VISION_OBJS)
-$(OBJ_DIR)/tests/test_stream.o: $(TEST_DIR)/test_stream.c | $(OBJ_DIR)
-	mkdir -p $(OBJ_DIR)/tests
-	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(SRC_DIR) -c $< -o $@
-
-$(BIN_DIR)/test_stream: $(TEST_STREAM_OBJS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(TEST_STREAM_OBJS) -o $@ $(TEST_LDFLAGS)
-	$(STRIP) $@
+TEST_STREAM_SRCS := $(TEST_DIR)/test_stream.c $(SRC_DIR)/video_capture.c \
+                    $(VISION_DIR)/image.c $(VISION_DIR)/pattern.c \
+                    $(VISION_DIR)/flow_stage1.c $(VISION_DIR)/obstacle.c
+$(BIN_DIR)/test_stream: $(TEST_STREAM_SRCS) | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS)
 	@echo "=== Built: $@ ==="
 
 # Build all test programs

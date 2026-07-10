@@ -17,7 +17,7 @@ SIZE        = arm-linux-gnueabihf-size
 OBJDUMP     = arm-linux-gnueabihf-objdump
 
 # Architecture flags
-ARCH_CFLAGS   := -mcpu=cortex-a8 -mfloat-abi=hard -mfpu=neon -marm -std=gnu99
+ARCH_CFLAGS   := -mcpu=cortex-a8 -mfloat-abi=hard -mfpu=neon -std=gnu99
 OPT_CFLAGS    := -Os -fomit-frame-pointer -ffunction-sections -fdata-sections
 WARN_CFLAGS   := -Wall -Wextra -Wno-unused-parameter
 
@@ -44,3 +44,10 @@ V4L2_CFLAGS   := $(shell pkg-config --cflags libv4l2 2>/dev/null || \
                   echo "-I$(SYSROOT_PATH)/usr/include")
 V4L2_LIBS     := $(shell pkg-config --libs libv4l2 2>/dev/null || \
                   echo "-lv4l2")
+
+# Soft-float toolchain for on-drone test programs (matches drone's soft-float ABI)
+SOFT_CC       := arm-linux-gnueabi-gcc
+SOFT_ARCH_CFLAGS := -mcpu=cortex-a8 -mfloat-abi=soft -std=gnu99
+SOFT_CFLAGS   := $(SOFT_ARCH_CFLAGS) $(OPT_CFLAGS) $(WARN_CFLAGS) \
+                 -I../src -I../src/vision
+SOFT_LDFLAGS  := -static -static-libgcc -lm -Wl,--gc-sections
