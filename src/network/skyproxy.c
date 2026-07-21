@@ -15,6 +15,7 @@
 
 #include "skyproxy.h"
 #include "mdns.h"
+#include "recovery.h"
 
 static volatile int running = 1;
 
@@ -23,15 +24,24 @@ static int at_sock = -1;
 static int nav_sock = -1;
 static int vid_out = -1;
 static struct sockaddr_in at_addr;
-static struct sockaddr_in sc_addr;
-static socklen_t sc_addr_len;
-static int sc_connected = 0;
-
 static uint32_t at_seq = 1;
 static uint64_t frame_count = 0;
 static uint64_t cmd_count = 0;
 static uint64_t video_frames = 0;
 static uint64_t video_bytes = 0;
+static uint8_t *vid_buf = NULL;
+static uint8_t *fu_buf = NULL;
+
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    uint64_t last_navdata_ms;
+    uint64_t last_sc_cmd_ms;
+    struct sockaddr_in sc_addr;
+    int sc_connected;
+    int gps_fix;
+} g_shared;
+
+static recovery_t g_recovery;
 
 typedef struct __attribute__((packed)) {
     uint16_t tag;
@@ -44,6 +54,12 @@ typedef struct __attribute__((packed)) {
     int32_t altitude;
     int32_t velocity[3];
 } navdata_demo_t;
+
+static uint64_t gettime_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
 
 static void handle_sigint(int sig) {
     (void)sig;
@@ -94,6 +110,10 @@ static void at_pcmd(const joystick_t *joy) {
     union { float f; int i; } y = { .f = joy->yaw };
     union { float f; int i; } g = { .f = joy->gaz };
     at_send("AT*PCMD=%d,1,%d,%d,%d,%d\r", at_seq++, r.i, p.i, g.i, y.i);
+}
+
+static void at_pcmd_zero(void) {
+    at_send("AT*PCMD=%d,1,0,0,0,0\r", at_seq++);
 }
 
 static void at_takeoff(void) {
@@ -162,8 +182,17 @@ typedef struct __attribute__((packed)) {
     float    pressure;
 } navdata_gps_t;
 
-static int send_telemetry(const telemetry_t *tel) {
-    if (!sc_connected) return -1;
+static void send_telemetry(const telemetry_t *tel) {
+    pthread_mutex_lock(&g_lock);
+    int connected = g_shared.sc_connected;
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(SC_TELEM_PORT);
+    dest.sin_addr.s_addr = g_shared.sc_addr.sin_addr.s_addr;
+    pthread_mutex_unlock(&g_lock);
+
+    if (!connected) return;
     char buf[512];
     int n;
     if (tel->gps_fix)
@@ -189,13 +218,7 @@ static int send_telemetry(const telemetry_t *tel) {
             tel->vx, tel->vy, tel->vz,
             tel->phi, tel->theta, tel->psi);
 
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family = AF_INET;
-    dest.sin_port = htons(SC_TELEM_PORT);
-    dest.sin_addr.s_addr = sc_addr.sin_addr.s_addr;
     sendto(vid_out, buf, n, 0, (struct sockaddr*)&dest, sizeof(dest));
-    return 0;
 }
 
 static int try_parse_arsdk3(const uint8_t *data, int len, joystick_t *joy) {
@@ -226,7 +249,6 @@ static int try_parse_arsdk3(const uint8_t *data, int len, joystick_t *joy) {
     case 0x02: at_land();     return 1;
     case 0x03: at_emergency(); return 1;
     case 0x04:
-        at_send("AT*REF=%d,290718208\r", at_seq++);
         at_config("control:flight_without_shell", "TRUE");
         return 1;
     default:
@@ -264,7 +286,6 @@ static void *command_thread(void *arg) {
         FD_SET(sc_sock, &fds);
         tv.tv_sec = 0;
         tv.tv_usec = 50000;
-
         int ret = select(sc_sock + 1, &fds, NULL, NULL, &tv);
         if (ret < 0) continue;
         if (ret == 0) continue;
@@ -274,17 +295,22 @@ static void *command_thread(void *arg) {
                          (struct sockaddr*)&from, &from_len);
         if (n <= 0) continue;
 
-        if (!sc_connected || memcmp(&from.sin_addr, &sc_addr.sin_addr,
-                                     sizeof(struct in_addr)) != 0) {
-            sc_addr = from;
-            sc_addr_len = from_len;
-            sc_connected = 1;
+        uint64_t now = gettime_ms();
+
+        pthread_mutex_lock(&g_lock);
+        if (!g_shared.sc_connected ||
+            memcmp(&from.sin_addr, &g_shared.sc_addr.sin_addr,
+                   sizeof(struct in_addr)) != 0) {
+            g_shared.sc_addr = from;
+            g_shared.sc_connected = 1;
             printf("Paired with Skycontroller: %s:%d\n",
                    inet_ntoa(from.sin_addr), ntohs(from.sin_port));
             joystick_t zero_joy;
             memset(&zero_joy, 0, sizeof(zero_joy));
             at_pcmd(&zero_joy);
         }
+        g_shared.last_sc_cmd_ms = now;
+        pthread_mutex_unlock(&g_lock);
 
         memset(&joy, 0, sizeof(joy));
         ret_pcmd = -1;
@@ -306,23 +332,40 @@ static void *command_thread(void *arg) {
 static void *navdata_thread(void *arg) {
     (void)arg;
     uint8_t buf[NAVDATA_BUF_SIZE];
-    struct sockaddr_in from;
-    socklen_t from_len = sizeof(from);
     telemetry_t tel;
     memset(&tel, 0, sizeof(tel));
-    uint64_t last_wdg = 0;
+
+    telemetry_t prev_tel;
+    memset(&prev_tel, 0, sizeof(prev_tel));
+    uint64_t last_telem_send = 0;
+
+    struct sockaddr_in from;
+    socklen_t from_len = sizeof(from);
+    fd_set fds;
+    struct timeval tv;
 
     while (running) {
+        FD_ZERO(&fds);
+        FD_SET(nav_sock, &fds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 50000;
+
+        int ret = select(nav_sock + 1, &fds, NULL, NULL, &tv);
+        uint64_t now = gettime_ms();
+
+        at_comwdg();
+
+        if (ret <= 0) continue;
+
         from_len = sizeof(from);
         int n = recvfrom(nav_sock, buf, sizeof(buf), 0,
                          (struct sockaddr*)&from, &from_len);
         if (n <= 0) continue;
 
-        uint64_t now = (uint64_t)clock() * 1000 / CLOCKS_PER_SEC;
-        if (now - last_wdg > 50) {
-            at_comwdg();
-            last_wdg = now;
-        }
+        now = gettime_ms();
+        pthread_mutex_lock(&g_lock);
+        g_shared.last_navdata_ms = now;
+        pthread_mutex_unlock(&g_lock);
 
         if (n < 16) continue;
         int offset = 16;
@@ -339,7 +382,6 @@ static void *navdata_thread(void *arg) {
                 tel.phi      = d->phi   / 1000.0f;
                 tel.theta    = d->theta / 1000.0f;
                 tel.psi      = d->psi   / 1000.0f;
-                send_telemetry(&tel);
             }
             if (tag == 27 && (unsigned int)size >= sizeof(navdata_gps_t) - 200) {
                 navdata_gps_t *g = (navdata_gps_t*)&buf[offset];
@@ -351,6 +393,9 @@ static void *navdata_thread(void *arg) {
                     tel.gps_speed  = g->speed;
                     tel.gps_bearing = g->degree;
                     tel.satellites = g->num_satellites;
+                    pthread_mutex_lock(&g_lock);
+                    g_shared.gps_fix = g->gps_fix;
+                    pthread_mutex_unlock(&g_lock);
                 } else {
                     tel.gps_fix = 0;
                 }
@@ -358,31 +403,71 @@ static void *navdata_thread(void *arg) {
             offset += size;
             if (offset % 4) offset += 4 - (offset % 4);
         }
+
+        if (now - last_telem_send > 100) {
+            if (memcmp(&tel, &prev_tel, sizeof(tel)) != 0) {
+                send_telemetry(&tel);
+                prev_tel = tel;
+                last_telem_send = now;
+            }
+        }
     }
     return NULL;
 }
 
-static int find_nal(const uint8_t *data, int len, int *sc_len) {
-    for (int i = 0; i < len - 3; i++) {
-        if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1) {
-            *sc_len = 4; return i;
+static int find_all_nal(const uint8_t *data, int len, int *offsets, int max_nal) {
+    int count = 0;
+    int i = 0;
+    while (i < len - 3 && count < max_nal) {
+        if (data[i] == 0 && data[i+1] == 0) {
+            if (data[i+2] == 0 && data[i+3] == 1) {
+                offsets[count++] = i;
+                i += 4;
+                continue;
+            }
+            if (data[i+2] == 1) {
+                offsets[count++] = i;
+                i += 3;
+                continue;
+            }
         }
-        if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 1) {
-            *sc_len = 3; return i;
-        }
+        i++;
     }
-    return -1;
+    return count;
 }
 
-static void send_video(const uint8_t *data, int len) {
-    if (!sc_connected || len <= 0) return;
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family = AF_INET;
-    dest.sin_port = htons(VID_DST_PORT);
-    dest.sin_addr.s_addr = sc_addr.sin_addr.s_addr;
-    sendto(vid_out, data, len, 0, (struct sockaddr*)&dest, sizeof(dest));
-    video_bytes += len;
+static void send_video_data(const uint8_t *data, int len, int flush) {
+    static uint8_t *batch = NULL;
+    static int batch_len = 0;
+    if (!batch) batch = vid_buf;
+
+    if (!data || len == 0) {
+        if (flush && batch_len > 0) {
+            pthread_mutex_lock(&g_lock);
+            int connected = g_shared.sc_connected;
+            struct sockaddr_in dest;
+            memset(&dest, 0, sizeof(dest));
+            dest.sin_family = AF_INET;
+            dest.sin_port = htons(VID_DST_PORT);
+            dest.sin_addr.s_addr = g_shared.sc_addr.sin_addr.s_addr;
+            pthread_mutex_unlock(&g_lock);
+            if (connected) {
+                sendto(vid_out, batch, batch_len, 0,
+                       (struct sockaddr*)&dest, sizeof(dest));
+                video_bytes += batch_len;
+            }
+            batch_len = 0;
+        }
+        return;
+    }
+
+    if (batch_len + len > VIDEO_BUF_SIZE) {
+        send_video_data(NULL, 0, 1);
+    }
+    memcpy(batch + batch_len, data, len);
+    batch_len += len;
+    video_frames++;
+    (void)flush;
 }
 
 static int tcp_connect(const char *ip, int port) {
@@ -404,13 +489,12 @@ static int tcp_connect(const char *ip, int port) {
 
 typedef struct {
     int fd;
-    int type;    // 0=TCP, 1=UDP, 2=RTP
+    int type;
     int port;
 } video_src_t;
 
 static void *video_relay_thread(void *arg) {
     (void)arg;
-    uint8_t buf[VIDEO_BUF_SIZE];
     uint8_t sps[MAX_SPS_PPS], pps[MAX_SPS_PPS];
     int sps_len = 0, pps_len = 0;
     fd_set fds;
@@ -418,6 +502,17 @@ static void *video_relay_thread(void *arg) {
 
     vid_out = socket(AF_INET, SOCK_DGRAM, 0);
     if (vid_out < 0) { perror("vid_out socket"); return NULL; }
+    int sndbuf = 262144;
+    setsockopt(vid_out, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
+    vid_buf = malloc(VIDEO_BUF_SIZE);
+    fu_buf = malloc(VIDEO_BUF_SIZE);
+    if (!vid_buf || !fu_buf) {
+        fprintf(stderr, "Video relay: OOM\n");
+        free(vid_buf); free(fu_buf);
+        if (vid_out >= 0) close(vid_out);
+        return NULL;
+    }
 
     video_src_t srcs[MAX_VID_SRCS];
     int n_srcs = 0;
@@ -440,14 +535,21 @@ static void *video_relay_thread(void *arg) {
     if (n_srcs == 0) {
         printf("Video relay: no video sources available\n");
         close(vid_out); vid_out = -1;
+        free(vid_buf); free(fu_buf);
+        return NULL;
+    }
+    printf("Video relay: %d source(s) active\n", n_srcs);
+
+    uint8_t *buf = malloc(VIDEO_BUF_SIZE);
+    if (!buf) {
+        fprintf(stderr, "Video relay: OOM for buf\n");
+        close(vid_out);
+        free(vid_buf); free(fu_buf);
         return NULL;
     }
 
-    printf("Video relay: %d source(s) active\n", n_srcs);
-
-    uint8_t fu_buffer[VIDEO_BUF_SIZE];
-    int fu_len = 0;
-    int fu_type = 0;
+    int fu_len = 0, fu_type = 0;
+    int nal_offsets[256];
 
     while (running) {
         FD_ZERO(&fds);
@@ -474,11 +576,11 @@ static void *video_relay_thread(void *arg) {
 
         int n = -1;
         if (srcs[src_idx].type == 0) {
-            n = read(srcs[src_idx].fd, buf, sizeof(buf));
+            n = read(srcs[src_idx].fd, buf, VIDEO_BUF_SIZE);
         } else {
             struct sockaddr_in from;
             socklen_t from_len = sizeof(from);
-            n = recvfrom(srcs[src_idx].fd, buf, sizeof(buf), 0,
+            n = recvfrom(srcs[src_idx].fd, buf, VIDEO_BUF_SIZE, 0,
                          (struct sockaddr*)&from, &from_len);
         }
         if (n <= 0) {
@@ -490,7 +592,10 @@ static void *video_relay_thread(void *arg) {
             continue;
         }
 
-        if (!sc_connected) continue;
+        pthread_mutex_lock(&g_lock);
+        int connected = g_shared.sc_connected;
+        pthread_mutex_unlock(&g_lock);
+        if (!connected) continue;
 
         int is_rtp = (n > 12 && (buf[0] & 0xC0) == 0x80);
 
@@ -507,43 +612,39 @@ static void *video_relay_thread(void *arg) {
                 int end   = (fu_hdr >> 6) & 1;
                 uint8_t original_nal_type = fu_hdr & 0x1F;
                 uint8_t nal_header = (fu_ind & 0xE0) | original_nal_type;
-
                 int payload = rtp_hdr + 2;
                 int payload_len = n - payload;
 
                 if (start) {
                     fu_len = 0;
                     fu_type = original_nal_type;
-                    fu_buffer[fu_len++] = nal_header;
-                    memcpy(fu_buffer + fu_len, buf + payload, payload_len);
+                    if (payload_len >= VIDEO_BUF_SIZE - 1) payload_len = VIDEO_BUF_SIZE - 2;
+                    fu_buf[fu_len++] = nal_header;
+                    memcpy(fu_buf + fu_len, buf + payload, payload_len);
                     fu_len += payload_len;
                 } else if (fu_len > 0 && fu_type == original_nal_type) {
-                    if (fu_len + payload_len < VIDEO_BUF_SIZE) {
-                        memcpy(fu_buffer + fu_len, buf + payload, payload_len);
-                        fu_len += payload_len;
-                    }
+                    int space = VIDEO_BUF_SIZE - fu_len;
+                    int copy = payload_len < space ? payload_len : space;
+                    memcpy(fu_buf + fu_len, buf + payload, copy);
+                    fu_len += copy;
                 }
 
                 if (end && fu_len > 0) {
-                    if (original_nal_type == 5) {
-                        if (sps_len > 0 && pps_len > 0) {
-                            uint8_t sc4[] = {0,0,0,1};
-                            send_video(sc4, 4);
-                            send_video(sps, sps_len);
-                            send_video(sc4, 4);
-                            send_video(pps, pps_len);
-                        }
+                    uint8_t sc4[] = {0,0,0,1};
+                    if (original_nal_type == 5 && sps_len > 0 && pps_len > 0) {
+                        send_video_data(sc4, 4, 0);
+                        send_video_data(sps, sps_len, 0);
+                        send_video_data(sc4, 4, 0);
+                        send_video_data(pps, pps_len, 0);
                     }
-                    uint8_t sc3[] = {0,0,0,1};
-                    send_video(sc3, 4);
-                    send_video(fu_buffer, fu_len);
-                    video_frames++;
+                    send_video_data(sc4, 4, 0);
+                    send_video_data(fu_buf, fu_len, 0);
+                    send_video_data(NULL, 0, 1);
                     fu_len = 0;
                 }
             } else if (nal_type < 24) {
                 uint8_t *nal = buf + rtp_hdr;
                 int nal_len = n - rtp_hdr;
-
                 if (nal_type == 7) {
                     sps_len = (nal_len < MAX_SPS_PPS) ? nal_len : MAX_SPS_PPS;
                     memcpy(sps, nal, sps_len);
@@ -551,75 +652,100 @@ static void *video_relay_thread(void *arg) {
                     pps_len = (nal_len < MAX_SPS_PPS) ? nal_len : MAX_SPS_PPS;
                     memcpy(pps, nal, pps_len);
                 }
-
+                uint8_t sc4[] = {0,0,0,1};
                 if (nal_type == 5) {
                     if (sps_len > 0 && pps_len > 0) {
-                        uint8_t sc4[] = {0,0,0,1};
-                        send_video(sc4, 4);
-                        send_video(sps, sps_len);
-                        send_video(sc4, 4);
-                        send_video(pps, pps_len);
+                        send_video_data(sc4, 4, 0);
+                        send_video_data(sps, sps_len, 0);
+                        send_video_data(sc4, 4, 0);
+                        send_video_data(pps, pps_len, 0);
                     }
                 }
-                uint8_t sc3[] = {0,0,0,1};
-                send_video(sc3, 4);
-                send_video(nal, nal_len);
-                video_frames++;
+                send_video_data(sc4, 4, 0);
+                send_video_data(nal, nal_len, 0);
+                send_video_data(NULL, 0, 1);
             }
         } else {
-            int sc_len;
-            int sc_pos = find_nal(buf, n, &sc_len);
-            if (sc_pos < 0) continue;
-            int offset = sc_pos;
+            int n_nal = find_all_nal(buf, n, nal_offsets, 256);
+            if (n_nal == 0) continue;
 
-            while (offset < n) {
-                int cur_sc_len;
-                int nal_start = find_nal(buf + offset, n - offset, &cur_sc_len);
-                if (nal_start < 0) break;
-
-                int nal_pos = offset + nal_start;
-                int search_from = nal_pos + cur_sc_len + 1;
-                if (search_from >= n) break;
-
-                int next_sc_len;
-                int next_sc_pos = find_nal(buf + search_from, n - search_from, &next_sc_len);
-                int nal_end;
-                if (next_sc_pos >= 0)
-                    nal_end = search_from + next_sc_pos;
-                else
-                    nal_end = n;
-
-                int nal_type = buf[nal_pos + cur_sc_len] & 0x1F;
-                int nal_data_len = nal_end - nal_pos;
+            for (int i = 0; i < n_nal; i++) {
+                int nal_start = nal_offsets[i];
+                int sc_len = (i + 1 < n_nal) ? nal_offsets[i+1] - nal_start : n - nal_start;
+                int nal_type = buf[nal_start + (buf[nal_start+2] == 1 ? 3 : 4)] & 0x1F;
 
                 if (nal_type == 7) {
-                    sps_len = (nal_data_len < MAX_SPS_PPS) ? nal_data_len : MAX_SPS_PPS;
-                    memcpy(sps, buf + nal_pos, sps_len);
+                    sps_len = (sc_len < MAX_SPS_PPS) ? sc_len : MAX_SPS_PPS;
+                    memcpy(sps, buf + nal_start, sps_len);
                 } else if (nal_type == 8) {
-                    pps_len = (nal_data_len < MAX_SPS_PPS) ? nal_data_len : MAX_SPS_PPS;
-                    memcpy(pps, buf + nal_pos, pps_len);
+                    pps_len = (sc_len < MAX_SPS_PPS) ? sc_len : MAX_SPS_PPS;
+                    memcpy(pps, buf + nal_start, pps_len);
                 }
 
                 if (nal_type == 5) {
                     if (sps_len > 0 && pps_len > 0) {
-                        uint8_t sc[] = {0,0,0,1};
-                        send_video(sc, 4);
-                        send_video(sps, sps_len);
-                        send_video(sc, 4);
-                        send_video(pps, pps_len);
+                        static const uint8_t sc[] = {0,0,0,1};
+                        send_video_data(sc, 4, 0);
+                        send_video_data(sps, sps_len, 0);
+                        send_video_data(sc, 4, 0);
+                        send_video_data(pps, pps_len, 0);
                     }
                 }
-
-                send_video(buf + nal_pos, nal_data_len);
-                video_frames++;
-                offset = nal_end;
+                send_video_data(buf + nal_start, sc_len, 0);
             }
+            send_video_data(NULL, 0, 1);
         }
     }
 
+    free(buf);
+    free(vid_buf); vid_buf = NULL;
+    free(fu_buf); fu_buf = NULL;
     for (int i = 0; i < n_srcs; i++)
         if (srcs[i].fd >= 0) close(srcs[i].fd);
     if (vid_out >= 0) close(vid_out);
+    return NULL;
+}
+
+static void *recovery_task(void *arg) {
+    (void)arg;
+    recovery_init(&g_recovery);
+    uint64_t last_comwdg = 0;
+
+    while (running) {
+        uint64_t now = gettime_ms();
+
+        pthread_mutex_lock(&g_lock);
+        recovery_update(&g_recovery, now,
+            g_shared.last_navdata_ms > 0,
+            g_shared.last_sc_cmd_ms > 0,
+            g_shared.gps_fix);
+        recovery_state_t state = recovery_tick(&g_recovery, now);
+        pthread_mutex_unlock(&g_lock);
+
+        int drone_connected = g_recovery.last_navdata_ms > 0 &&
+            (now - g_recovery.last_navdata_ms) < 5000;
+
+        if (drone_connected && now - last_comwdg > 50) {
+            at_comwdg();
+            last_comwdg = now;
+        }
+
+        switch (state) {
+        case RECOVERY_HOVER:
+            at_pcmd_zero();
+            break;
+        case RECOVERY_LAND:
+            at_land();
+            break;
+        case RECOVERY_DRONE_LOST:
+            at_pcmd_zero();
+            break;
+        default:
+            break;
+        }
+
+        usleep(50000);
+    }
     return NULL;
 }
 
@@ -627,8 +753,6 @@ static void print_usage(const char *name) {
     fprintf(stderr,
         "Usage: %s [options]\n"
         "Skycontroller 2 <-> AR.Drone 2.0 proxy\n\n"
-        "Translates Bebop ARSDK3 protocol to AR.Drone AT commands\n"
-        "and relays H.264 video + navdata to the Skycontroller.\n\n"
         "Options:\n"
         "  -p <port>     Skycontroller command port (default: %d)\n"
         "  -t <port>     Telemetry port (default: %d)\n"
@@ -657,6 +781,9 @@ int main(int argc, char **argv) {
     signal(SIGINT, handle_sigint);
     signal(SIGTERM, handle_sigint);
 
+    memset(&g_shared, 0, sizeof(g_shared));
+    recovery_init(&g_recovery);
+
     printf("=== Skycontroller 2 <-> AR.Drone Proxy ===\n");
     printf("Drone IP: %s\n", drone_ip);
     printf("Listening for Skycontroller on port %d\n", sc_port);
@@ -683,22 +810,24 @@ int main(int argc, char **argv) {
     at_comwdg();
     usleep(50000);
 
-    pthread_t cmd_thr, nav_thr, vid_thr, mdns_thr;
+    pthread_t cmd_thr, nav_thr, vid_thr, mdns_thr, rec_thr;
     pthread_create(&cmd_thr, NULL, command_thread, NULL);
     pthread_create(&nav_thr, NULL, navdata_thread, NULL);
     pthread_create(&vid_thr, NULL, video_relay_thread, NULL);
     pthread_create(&mdns_thr, NULL, mdns_thread, NULL);
+    pthread_create(&rec_thr, NULL, recovery_task, NULL);
 
     printf("\nProxy running. Connect Skycontroller 2 to drone WiFi\n");
     printf("(SSID: ardrone2_xxxx) and launch FreeFlight Pro.\n\n");
 
     while (running) {
         usleep(500000);
-        if (verbose && sc_connected)
-            printf("\rCMDs: %llu | Video frames: %llu (%llu KB)",
+        if (verbose && g_shared.sc_connected)
+            printf("\rCMDs: %llu | Video frames: %llu (%llu KB) | %s",
                    (unsigned long long)cmd_count,
                    (unsigned long long)video_frames,
-                   (unsigned long long)(video_bytes / 1024));
+                   (unsigned long long)(video_bytes / 1024),
+                   recovery_state_name(g_recovery.state));
     }
 
     printf("\n\nShutting down...\n");
@@ -711,6 +840,7 @@ int main(int argc, char **argv) {
     pthread_join(nav_thr, NULL);
     pthread_join(vid_thr, NULL);
     pthread_join(mdns_thr, NULL);
+    pthread_join(rec_thr, NULL);
     close(sc_sock);
     close(at_sock);
     close(nav_sock);

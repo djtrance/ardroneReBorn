@@ -276,6 +276,7 @@ void *mdns_thread(void *arg) {
         uint16_t id = (buf[0] << 8) | buf[1];
 
         int offset = 12;
+        int rlen = 0;
         for (int q = 0; q < qdcount; q++) {
             if (offset >= n) break;
 
@@ -293,31 +294,26 @@ void *mdns_thread(void *arg) {
 
             uint16_t qtype = (buf[name_end] << 8) | buf[name_end + 1];
 
-            int rlen = 0;
-
             if (qtype == 12) {
-                if (compare_dns_name(buf, n, offset, NAME_SVC_PTR) >= 0) {
+                if (compare_dns_name(buf, n, offset, NAME_SVC_PTR) >= 0)
                     rlen = build_ptr_response(resp, id, NAME_SVC_PTR);
-                }
             } else if (qtype == 33) {
-                int c = compare_dns_name(buf, n, offset, NAME_SVC_PTR);
-                if (c < 0) c = offset;
                 rlen = build_short_response(resp, id, NAME_SVC_PTR, 12, 33);
             } else if (qtype == 1) {
                 if (compare_dns_name(buf, n, offset, NAME_HOST_PTR) >= 0)
                     rlen = build_short_response(resp, id, NAME_HOST_PTR, 12, 1);
             }
 
-            if (rlen > 0) {
-                struct sockaddr_in to;
-                memset(&to, 0, sizeof(to));
-                to.sin_family = AF_INET;
-                to.sin_port = htons(MDNS_PORT);
-                to.sin_addr.s_addr = inet_addr(MDNS_GROUP);
-                sendto(mdns_sock, resp, rlen, 0, (struct sockaddr*)&to, sizeof(to));
-            }
-
             offset = name_end + 4;
+        }
+
+        if (rlen > 0) {
+            struct sockaddr_in to;
+            memset(&to, 0, sizeof(to));
+            to.sin_family = AF_INET;
+            to.sin_port = htons(MDNS_PORT);
+            to.sin_addr.s_addr = inet_addr(MDNS_GROUP);
+            sendto(mdns_sock, resp, rlen, 0, (struct sockaddr*)&to, sizeof(to));
         }
     }
 
