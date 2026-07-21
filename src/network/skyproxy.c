@@ -20,6 +20,7 @@ static volatile int running = 1;
 static int sc_sock = -1;
 static int at_sock = -1;
 static int nav_sock = -1;
+static int vid_out = -1;
 static struct sockaddr_in at_addr;
 static struct sockaddr_in sc_addr;
 static socklen_t sc_addr_len;
@@ -28,6 +29,8 @@ static int sc_connected = 0;
 static uint32_t at_seq = 1;
 static uint64_t frame_count = 0;
 static uint64_t cmd_count = 0;
+static uint64_t video_frames = 0;
+static uint64_t video_bytes = 0;
 
 typedef struct __attribute__((packed)) {
     uint16_t tag;
@@ -51,6 +54,8 @@ static int udp_bind(int port) {
     if (fd < 0) { perror("socket"); return -1; }
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -129,8 +134,7 @@ static int send_telemetry(const telemetry_t *tel) {
     dest.sin_family = AF_INET;
     dest.sin_port = htons(SC_TELEM_PORT);
     dest.sin_addr.s_addr = sc_addr.sin_addr.s_addr;
-
-    sendto(nav_sock, buf, n, 0, (struct sockaddr*)&dest, sizeof(dest));
+    sendto(vid_out, buf, n, 0, (struct sockaddr*)&dest, sizeof(dest));
     return 0;
 }
 
@@ -280,10 +284,231 @@ static void *navdata_thread(void *arg) {
     return NULL;
 }
 
+static int find_nal(const uint8_t *data, int len, int *sc_len) {
+    for (int i = 0; i < len - 3; i++) {
+        if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1) {
+            *sc_len = 4; return i;
+        }
+        if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 1) {
+            *sc_len = 3; return i;
+        }
+    }
+    return -1;
+}
+
+static void send_video(const uint8_t *data, int len) {
+    if (!sc_connected || len <= 0) return;
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(VID_DST_PORT);
+    dest.sin_addr.s_addr = sc_addr.sin_addr.s_addr;
+    sendto(vid_out, data, len, 0, (struct sockaddr*)&dest, sizeof(dest));
+    video_bytes += len;
+}
+
+static void *video_relay_thread(void *arg) {
+    (void)arg;
+    int vid_in = -1;
+    int vid_in2 = -1;
+    uint8_t buf[VIDEO_BUF_SIZE];
+    uint8_t sps[MAX_SPS_PPS], pps[MAX_SPS_PPS];
+    int sps_len = 0, pps_len = 0;
+    int video_source = 0;
+    int seen_iframe = 0;
+    fd_set fds;
+    struct timeval tv;
+
+    vid_out = socket(AF_INET, SOCK_DGRAM, 0);
+    if (vid_out < 0) { perror("vid_out socket"); return NULL; }
+
+    vid_in = udp_bind(VID_SRC_PORT);
+    vid_in2 = udp_bind(VID_SRC_PORT2);
+    if (vid_in < 0 && vid_in2 < 0) {
+        printf("Video relay: no video ports available\n");
+        close(vid_out); vid_out = -1;
+        return NULL;
+    }
+
+    printf("Video relay listening on ports %d and %d\n",
+           VID_SRC_PORT, VID_SRC_PORT2);
+
+    uint8_t fu_buffer[VIDEO_BUF_SIZE];
+    int fu_len = 0;
+    int fu_type = 0;
+
+    while (running) {
+        FD_ZERO(&fds);
+        int max_fd = -1;
+        if (vid_in >= 0) { FD_SET(vid_in, &fds); if (vid_in > max_fd) max_fd = vid_in; }
+        if (vid_in2 >= 0) { FD_SET(vid_in2, &fds); if (vid_in2 > max_fd) max_fd = vid_in2; }
+        tv.tv_sec = 0; tv.tv_usec = 100000;
+
+        int ret = select(max_fd + 1, &fds, NULL, NULL, &tv);
+        if (ret <= 0) continue;
+
+        int src_fd = -1;
+        if (vid_in >= 0 && FD_ISSET(vid_in, &fds)) {
+            src_fd = vid_in; video_source = VID_SRC_PORT;
+        } else if (vid_in2 >= 0 && FD_ISSET(vid_in2, &fds)) {
+            src_fd = vid_in2; video_source = VID_SRC_PORT2;
+        }
+
+        if (src_fd < 0) continue;
+
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+        int n = recvfrom(src_fd, buf, sizeof(buf), 0,
+                         (struct sockaddr*)&from, &from_len);
+        if (n <= 0) continue;
+
+        if (!sc_connected) continue;
+
+        int offset = 0;
+        int is_rtp = (n > 12 && (buf[0] & 0xC0) == 0x80);
+
+        if (is_rtp) {
+            int rtp_hdr = 12;
+            int pt = buf[1] & 0x7F;
+            if (pt != 96 && pt != 97 && pt != 98) continue;
+            uint8_t nal_type = buf[rtp_hdr] & 0x1F;
+
+            if (nal_type == 28) {
+                uint8_t fu_ind = buf[rtp_hdr];
+                uint8_t fu_hdr = buf[rtp_hdr + 1];
+                int start = (fu_hdr >> 7) & 1;
+                int end   = (fu_hdr >> 6) & 1;
+                uint8_t original_nal_type = fu_hdr & 0x1F;
+                uint8_t nal_header = (fu_ind & 0xE0) | original_nal_type;
+
+                int payload = rtp_hdr + 2;
+                int payload_len = n - payload;
+
+                if (start) {
+                    fu_len = 0;
+                    fu_type = original_nal_type;
+                    fu_buffer[fu_len++] = nal_header;
+                    memcpy(fu_buffer + fu_len, buf + payload, payload_len);
+                    fu_len += payload_len;
+                } else if (fu_len > 0 && fu_type == original_nal_type) {
+                    if (fu_len + payload_len < VIDEO_BUF_SIZE) {
+                        memcpy(fu_buffer + fu_len, buf + payload, payload_len);
+                        fu_len += payload_len;
+                    }
+                }
+
+                if (end && fu_len > 0) {
+                    uint8_t *data_start = fu_buffer;
+                    int data_len = fu_len;
+
+                    if (original_nal_type == 5) {
+                        if (sps_len > 0 && pps_len > 0) {
+                            uint8_t sc4[] = {0,0,0,1};
+                            send_video(sc4, 4);
+                            send_video(sps, sps_len);
+                            send_video(sc4, 4);
+                            send_video(pps, pps_len);
+                        }
+                        seen_iframe = 1;
+                    }
+                    uint8_t sc3[] = {0,0,0,1};
+                    send_video(sc3, 4);
+                    send_video(data_start, data_len);
+                    video_frames++;
+                    fu_len = 0;
+                }
+            } else if (nal_type < 24) {
+                uint8_t *nal = buf + rtp_hdr;
+                int nal_len = n - rtp_hdr;
+
+                if (nal_type == 7) {
+                    sps_len = (nal_len < MAX_SPS_PPS) ? nal_len : MAX_SPS_PPS;
+                    memcpy(sps, nal, sps_len);
+                } else if (nal_type == 8) {
+                    pps_len = (nal_len < MAX_SPS_PPS) ? nal_len : MAX_SPS_PPS;
+                    memcpy(pps, nal, pps_len);
+                }
+
+                if (nal_type == 5) {
+                    if (sps_len > 0 && pps_len > 0) {
+                        uint8_t sc4[] = {0,0,0,1};
+                        send_video(sc4, 4);
+                        send_video(sps, sps_len);
+                        send_video(sc4, 4);
+                        send_video(pps, pps_len);
+                    }
+                    seen_iframe = 1;
+                }
+                uint8_t sc3[] = {0,0,0,1};
+                send_video(sc3, 4);
+                send_video(nal, nal_len);
+                video_frames++;
+            }
+        } else {
+            int sc_len;
+            int sc_pos = find_nal(buf, n, &sc_len);
+            if (sc_pos < 0) continue;
+            offset = sc_pos;
+
+            while (offset < n) {
+                int cur_sc_len;
+                int nal_start = find_nal(buf + offset, n - offset, &cur_sc_len);
+                if (nal_start < 0) break;
+
+                int nal_pos = offset + nal_start;
+                int search_from = nal_pos + cur_sc_len + 1;
+                if (search_from >= n) break;
+
+                int next_sc_len;
+                int next_sc_pos = find_nal(buf + search_from, n - search_from, &next_sc_len);
+                int nal_end;
+                if (next_sc_pos >= 0)
+                    nal_end = search_from + next_sc_pos;
+                else
+                    nal_end = n;
+
+                int nal_type = buf[nal_pos + cur_sc_len] & 0x1F;
+                int nal_data_len = nal_end - nal_pos;
+
+                if (nal_type == 7) {
+                    sps_len = (nal_data_len < MAX_SPS_PPS) ? nal_data_len : MAX_SPS_PPS;
+                    memcpy(sps, buf + nal_pos, sps_len);
+                } else if (nal_type == 8) {
+                    pps_len = (nal_data_len < MAX_SPS_PPS) ? nal_data_len : MAX_SPS_PPS;
+                    memcpy(pps, buf + nal_pos, pps_len);
+                }
+
+                if (nal_type == 5) {
+                    if (sps_len > 0 && pps_len > 0) {
+                        uint8_t sc[] = {0,0,0,1};
+                        send_video(sc, 4);
+                        send_video(sps, sps_len);
+                        send_video(sc, 4);
+                        send_video(pps, pps_len);
+                    }
+                    seen_iframe = 1;
+                }
+
+                send_video(buf + nal_pos, nal_data_len);
+                video_frames++;
+
+                offset = nal_end;
+            }
+        }
+    }
+
+    if (vid_in >= 0) close(vid_in);
+    if (vid_in2 >= 0) close(vid_in2);
+    if (vid_out >= 0) close(vid_out);
+    return NULL;
+}
+
 static void print_usage(const char *name) {
     fprintf(stderr,
         "Usage: %s [options]\n"
         "Skycontroller 2 <-> AR.Drone 2.0 proxy\n\n"
+        "Translates Bebop ARSDK3 protocol to AR.Drone AT commands\n"
+        "and relays H.264 video + navdata to the Skycontroller.\n\n"
         "Options:\n"
         "  -p <port>     Skycontroller command port (default: %d)\n"
         "  -t <port>     Telemetry port (default: %d)\n"
@@ -295,15 +520,13 @@ static void print_usage(const char *name) {
 
 int main(int argc, char **argv) {
     int sc_port = SC_PORT;
-    int telem_port = SC_TELEM_PORT;
     char drone_ip[16] = "192.168.1.1";
     int verbose = 0;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:t:d:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "p:d:vh")) != -1) {
         switch (opt) {
         case 'p': sc_port = atoi(optarg); break;
-        case 't': telem_port = atoi(optarg); break;
         case 'd': strncpy(drone_ip, optarg, 15); drone_ip[15] = '\0'; break;
         case 'v': verbose = 1; break;
         case 'h': print_usage(argv[0]); return 0;
@@ -317,7 +540,8 @@ int main(int argc, char **argv) {
     printf("=== Skycontroller 2 <-> AR.Drone Proxy ===\n");
     printf("Drone IP: %s\n", drone_ip);
     printf("Listening for Skycontroller on port %d\n", sc_port);
-    printf("Sending telemetry to port %d\n", telem_port);
+    printf("Video relay: %d/%d -> %d\n", VID_SRC_PORT, VID_SRC_PORT2, VID_DST_PORT);
+    printf("Telemetry on port %d\n", SC_TELEM_PORT);
 
     sc_sock = udp_bind(sc_port);
     if (sc_sock < 0) return 1;
@@ -334,18 +558,21 @@ int main(int argc, char **argv) {
     at_comwdg();
     usleep(50000);
 
-    pthread_t cmd_thr, nav_thr;
+    pthread_t cmd_thr, nav_thr, vid_thr;
     pthread_create(&cmd_thr, NULL, command_thread, NULL);
     pthread_create(&nav_thr, NULL, navdata_thread, NULL);
+    pthread_create(&vid_thr, NULL, video_relay_thread, NULL);
 
-    printf("Proxy running. Waiting for Skycontroller...\n");
-    printf("Connect Skycontroller 2 to drone WiFi (SSID: ardrone2_xxxx)\n\n");
+    printf("\nProxy running. Connect Skycontroller 2 to drone WiFi\n");
+    printf("(SSID: ardrone2_xxxx) and launch FreeFlight Pro.\n\n");
 
     while (running) {
-        usleep(100000);
+        usleep(500000);
         if (verbose && sc_connected)
-            printf("\rFrames: %llu  Commands: %llu  ", 
-                   (unsigned long long)frame_count, (unsigned long long)cmd_count);
+            printf("\rCMDs: %llu | Video frames: %llu (%llu KB)",
+                   (unsigned long long)cmd_count,
+                   (unsigned long long)video_frames,
+                   (unsigned long long)(video_bytes / 1024));
     }
 
     printf("\n\nShutting down...\n");
@@ -354,11 +581,14 @@ int main(int argc, char **argv) {
     running = 0;
     pthread_join(cmd_thr, NULL);
     pthread_join(nav_thr, NULL);
+    pthread_join(vid_thr, NULL);
     close(sc_sock);
     close(at_sock);
     close(nav_sock);
 
-    printf("Stats: %llu frames, %llu PCMD commands\n",
-           (unsigned long long)frame_count, (unsigned long long)cmd_count);
+    printf("Stats: %llu commands, %llu video frames, %llu KB sent\n",
+           (unsigned long long)cmd_count,
+           (unsigned long long)video_frames,
+           (unsigned long long)(video_bytes / 1024));
     return 0;
 }
