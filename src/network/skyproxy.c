@@ -118,22 +118,47 @@ static void at_config(const char *key, const char *val) {
 typedef struct __attribute__((packed)) {
     uint16_t tag;
     uint16_t size;
-    double   latitude;
-    double   longitude;
-    double   altitude_ell;
-    double   altitude_msl;
-    float    hdop;
-    float    vdop;
+    double   lat;
+    double   lon;
+    double   elevation;
+    double   hdop;
+    int32_t  data_available;
+    uint8_t  unk_0[8];
+    double   lat0;
+    double   lon0;
+    double   lat_fuse;
+    double   lon_fuse;
+    uint32_t gps_state;
+    uint8_t  unk_1[40];
+    double   vdop;
+    double   pdop;
     float    speed;
-    uint8_t  fix_status;
-    uint8_t  satellites;
-    uint16_t year;
-    uint8_t  month;
-    uint8_t  day;
-    uint8_t  hour;
-    uint8_t  min;
-    uint8_t  sec;
-    uint8_t  padding[7];
+    uint32_t last_frame_timestamp;
+    float    degree;
+    float    degree_mag;
+    uint8_t  unk_2[16];
+    struct {
+        uint8_t sat;
+        uint8_t cn0;
+    } channels[12];
+    int32_t  gps_plugged;
+    uint8_t  unk_3[108];
+    double   gps_time;
+    uint16_t week;
+    uint8_t  gps_fix;
+    uint8_t  num_satellites;
+    uint8_t  unk_4[24];
+    double   ned_vel_c0;
+    double   ned_vel_c1;
+    double   ned_vel_c2;
+    double   pos_accur_c0;
+    double   pos_accur_c1;
+    double   pos_accur_c2;
+    float    speed_acur;
+    float    time_acur;
+    uint8_t  unk_5[72];
+    float    temperature;
+    float    pressure;
 } navdata_gps_t;
 
 static int send_telemetry(const telemetry_t *tel) {
@@ -230,6 +255,8 @@ static void *command_thread(void *arg) {
     socklen_t from_len = sizeof(from);
     fd_set fds;
     struct timeval tv;
+    joystick_t joy;
+    int ret_pcmd = -1;
 
     while (running) {
         FD_ZERO(&fds);
@@ -253,13 +280,14 @@ static void *command_thread(void *arg) {
             sc_connected = 1;
             printf("Paired with Skycontroller: %s:%d\n",
                    inet_ntoa(from.sin_addr), ntohs(from.sin_port));
-            joystick_t zero_joy = {0};
+            joystick_t zero_joy;
+            memset(&zero_joy, 0, sizeof(zero_joy));
             at_pcmd(&zero_joy);
         }
 
+        memset(&joy, 0, sizeof(joy));
+        ret_pcmd = -1;
         frame_count++;
-        joystick_t joy = {0};
-        int ret_pcmd = -1;
 
         if (buf[0] == ARDRONE3_PROJECT)
             ret_pcmd = try_parse_arsdk3(buf, n, &joy);
@@ -279,7 +307,8 @@ static void *navdata_thread(void *arg) {
     uint8_t buf[NAVDATA_BUF_SIZE];
     struct sockaddr_in from;
     socklen_t from_len = sizeof(from);
-    telemetry_t tel = {0};
+    telemetry_t tel;
+    memset(&tel, 0, sizeof(tel));
     uint64_t last_wdg = 0;
 
     while (running) {
@@ -311,15 +340,16 @@ static void *navdata_thread(void *arg) {
                 tel.psi      = d->psi   / 1000.0f;
                 send_telemetry(&tel);
             }
-            if (tag == 7 && (unsigned int)size >= 56) {
+            if (tag == 27 && (unsigned int)size >= sizeof(navdata_gps_t) - 200) {
                 navdata_gps_t *g = (navdata_gps_t*)&buf[offset];
-                if (g->fix_status > 0) {
-                    tel.gps_fix    = g->fix_status;
-                    tel.lat        = g->latitude;
-                    tel.lon        = g->longitude;
-                    tel.gps_alt    = g->altitude_msl;
+                if (g->gps_plugged && g->gps_fix > 0) {
+                    tel.gps_fix    = g->gps_fix;
+                    tel.lat        = g->lat;
+                    tel.lon        = g->lon;
+                    tel.gps_alt    = g->elevation;
                     tel.gps_speed  = g->speed;
-                    tel.satellites = g->satellites;
+                    tel.gps_bearing = g->degree;
+                    tel.satellites = g->num_satellites;
                 } else {
                     tel.gps_fix = 0;
                 }
@@ -643,6 +673,10 @@ int main(int argc, char **argv) {
     if (nav_sock < 0) { close(sc_sock); close(at_sock); return 1; }
 
     at_config("general:navdata_demo", "FALSE");
+    at_config("general:navdata_options", "777060865");
+    at_config("gps:latitude", "0.0");
+    at_config("gps:longitude", "0.0");
+    at_config("gps:altitude", "0.0");
     at_config("control:flight_without_shell", "TRUE");
     at_seq = 10;
     at_comwdg();
@@ -666,7 +700,8 @@ int main(int argc, char **argv) {
     }
 
     printf("\n\nShutting down...\n");
-    joystick_t zero_joy = {0};
+    joystick_t zero_joy;
+    memset(&zero_joy, 0, sizeof(zero_joy));
     at_pcmd(&zero_joy);
     running = 0;
     pthread_join(cmd_thr, NULL);
