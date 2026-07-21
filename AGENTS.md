@@ -2,7 +2,32 @@
 
 ## Project
 
-H.264 onboard video encoding framework for Parrot AR.Drone 2.0 (TI OMAP3530). Code runs ON the drone, not on a ground station.
+Transform the AR.Drone 2.0 (TI OMAP3530, 2012) into a contemporary autonomous
+UAV matching DJI Spark capabilities and beyond — with GPS/visual navigation,
+obstacle avoidance, 4G/wifibroadcast long-range video, and military-grade
+autonomous features. All code runs ON the drone, not on a ground station.
+
+### Target Feature Set
+
+| Feature | DJI Spark | AR.Drone 2 stock | With Upgrades |
+|---------|-----------|-------------------|---------------|
+| GPS positioning | GPS+GLONASS | ❌ None | ✅ USB GPS (u-blox 8) |
+| GPS Return-to-Home | ✅ | ❌ None | ✅ GPS RTH (coded) |
+| Vision Return-to-Home | ✅ | ❌ None | ✅ Visual odometry |
+| Obstacle avoidance | Forward only | ❌ None | ✅ Vision + sensors |
+| Optical flow | ✅ Downward | ❌ None | ✅ Downward camera |
+| 720p H.264 video | ❌ 1080p | ✅ 720p | ✅ DSP-encoded H.264 |
+| Gesture control | ✅ | ❌ | ✅ Vision-based |
+| Follow me | ✅ | ❌ | ✅ GPS + vision |
+| Waypoint navigation | ✅ | ❌ | ✅ GPS waypoints |
+| Geofence | ✅ | ❌ | ✅ Software geofence |
+| WiFi range | 2km (enhanced) | ~200m | ✅ 5km+ (wifibroadcast) |
+| 4G remote pilot | ❌ | ❌ | ✅ USB 4G modem |
+| Drone detection | ❌ | ❌ | ✅ RTL-SDR + vision |
+| FPV head tracking | ❌ | ❌ | ✅ Arduino IMU bridge |
+| Autonomous takeoff/land | ✅ | ❌ | ✅ Vision + altitude |
+| Swarm coordination | ❌ | ❌ | ⚪ Via 4G mesh |
+| ADS-B airspace | ❌ | ❌ | ⚪ RTL-SDR 1090MHz |
 
 ## Key Architecture
 
@@ -13,30 +38,103 @@ H.264 onboard video encoding framework for Parrot AR.Drone 2.0 (TI OMAP3530). Co
 - **DSP acceleration**: TI DVSDK (DSP/BIOS), baseimage.dof + dynreg for codec engine
 - **Cross-compilation is mandatory** — no build tools on the drone itself
 
-## Directory Layout
+## Quick Start
+
+## Prerequisites
+- Docker (>=20.10) with `--platform=linux/amd64` support for Apple Silicon.
+- Host ARM toolchain installed: `parrot-tools-linuxgnutools-2016.02-linaro` (or the older 2012.03 soft‑float version if you need non‑static binaries).
+- `arm-linux-gnueabihf-gcc` in PATH for building the DSP binaries.
+
+## Build and Deploy Workflow
+1. **Build Docker image** (once):
+   ```bash
+   cd build && ./docker-build.sh
+   ```
+2. **Enter container**:
+   ```bash
+   ./docker-run.sh
+   ```
+3. **Compile**:
+   - All binaries: `make`
+   - GStreamer plugin only: `make plugin`
+   - DSP init utility: `make dsp_init`
+4. **Run tests**:
+   ```bash
+   make tests
+   ```
+5. **Deploy to drone** (replace `<drone_ip>`):
+   ```bash
+   tools/deploy.sh build/bin/<binary> <drone_ip>
+   ```
+6. **Start binary on drone** (via telnet):
+   ```bash
+   telnet <drone_ip>
+   /data/video/<binary> [args]
+   ```
+
+## Important Notes
+- The drone runs Linux 2.6.32; binaries must be dynamically linked and **not static**.
+- `libti_ce.so` must be present on the drone for DSP encoding to work.
+- `/opt/arm` and `/lib/dsp` are bind‑mounted at boot; ensure the firmware blobs exist under `/data/video/opt/arm`.
+- For debugging, set `export ARDRONE_LOG=1` on the drone before launching.
+- All test binaries are built with the soft‑float toolchain and are located in `build/bin/`.
+- The project uses GStreamer 0.10; ensure the drone has the correct version of libgstreamer.
+
+---
+
 
 ```
 parrotFramework/
-├── README.md           # main documentation (Spanish/English)
-├── AGENTS.md           # this file
-├── docs/               # technical specs (OMAP3530, H.264, protocols)
-├── src/                # C source code
-│   ├── main.c              # standalone drone_encoder binary
-│   ├── dsp_init_main.c     # standalone DSP init utility
-│   ├── gst_plugin.c/.h     # GStreamer 0.10 filter element
-│   ├── h264_encode.c/.h    # H.264 encoder abstraction (TI CE 3.24)
-│   ├── h264_init.c/.h      # DSP firmware loader (bind mounts, cexec, dynreg)
-│   ├── video_capture.c/.h  # V4L2 camera capture (UYVY → NV12)
-│   └── connection.c/.h     # AR.Drone AT command + navdata protocol
-├── tools/              # host-side dev tools (deploy scripts, helpers)
-├── build/              # Makefiles, cross-compilation toolchain config
-│   ├── Dockerfile
-│   ├── docker-build.sh
-│   ├── docker-run.sh
-│   ├── Makefile
-│   ├── Makefile.include
-│   └── sysroot/ti/packages/  # TI Codec Engine + XDAIS headers (ti/sdo/ce/, ti/xdais/)
-└── examples/           # functional examples (connection, encoding pipeline)
+├── README.md                  # main documentation (Spanish/English)
+├── AGENTS.md                  # this file
+├── docs/                      # technical specs (OMAP3530, H.264, protocols)
+│   ├── wfb-integration.md     # wifibroadcast + UVC camera design
+│   └── hardware-upgrades.md   # comprehensive hardware upgrade matrix
+├── src/                       # C source code
+│   ├── main.c                 # standalone drone_encoder binary
+│   ├── dsp_init_main.c        # standalone DSP init utility
+│   ├── gst_plugin.c/.h        # GStreamer 0.10 filter element
+│   ├── h264_encode.c/.h       # H.264 encoder abstraction (TI CE 3.24)
+│   ├── h264_init.c/.h         # DSP firmware loader (mounts, cexec, dynreg)
+│   ├── video_capture.c/.h     # V4L2 camera capture (UYVY → NV12)
+│   ├── connection.c/.h        # AR.Drone AT command + navdata protocol
+│   ├── vision/                # Computer vision pipeline
+│   │   ├── image.h                # grayscale image struct
+│   │   ├── pattern.h              # feature/pattern detection
+│   │   ├── flow_stage1.h          # SAD block-matching optical flow
+│   │   ├── obstacle.h             # looming, asymmetry, vert line
+│   ├── navigation/            # GPS + position estimation
+│   │   ├── gps.c/.h               # NMEA parser, Haversine, RTH
+│   ├── network/               # Communication
+│   │   ├── modem.c/.h             # 4G/5G modem AT + connection control
+│   ├── detection/             # External threats/airspace
+│   │   (future: RTL-SDR ADS-B, audio drone detection)
+│   └── tests/                 # On-drone test programs
+│       ├── test_minimal.c         # toolchain verification
+│       ├── test_connection.c      # AT/navdata
+│       ├── test_camera.c          # V4L2 capture
+│       ├── test_vision.c          # full vision pipeline
+│       ├── test_stream.c          # vision + UDP to ground station
+│       ├── test_wifi_caps.c       # WiFi monitor mode / raw socket test
+│       ├── test_uvc_camera.c      # USB UVC via libusb
+│       ├── test_gps.c             # GPS NMEA parser test
+│       └── test_modem.c           # 4G/5G modem AT + signal test
+├── tools/                  # host-side dev tools
+│   ├── deploy.sh               # FTP upload to drone
+│   ├── drone-boot.sh           # module loading + service startup
+│   ├── video_receiver.c        # SDL ground station with HUD
+│   ├── linux-kernel/           # kernel module build system
+│   │   └── build_modules.sh    # cross-compile ALL kernel .ko modules
+│   ├── wfb-bridge/             # wifibroadcast transmitter
+│   │   ├── wfb_tx.c                # raw socket WiFi injection
+│   │   └── Makefile                # ARM cross-compile
+│   └── arduino-bridge/         # I2C/GPIO sensor bridge FW
+│       └── arduino_bridge.ino      # Arduino sketch (I2C+GPIO protocol)
+├── build/                  # Makefiles, toolchain config
+│   ├── Dockerfile, docker-build.sh, docker-run.sh
+│   ├── Makefile, Makefile.include
+│   └── sysroot/ti/packages/  # TI Codec Engine + XDAIS headers
+└── examples/               # functional examples
 ```
 
 ## Cross-Compilation Toolchain
@@ -215,6 +313,10 @@ Three test programs in `build/bin/`:
 | `test_camera` | `src/tests/test_camera.c` | V4L2 capture (resolution, FPS, brightness) | `./test_camera [dev] [w] [h] [frames]` |
 | `test_vision` | `src/tests/test_vision.c` | Camera + Stage 1 flow + obstacle detection | `./test_vision [dev] [frames]` |
 | `test_stream` | `src/tests/test_stream.c` | Camera + flow + obstacle + UDP stream to ground station | `./test_stream [dev] [host-ip] [port] [frames]` |
+| `test_wifi_caps` | `src/tests/test_wifi_caps.c` | WiFi monitor mode + raw socket + channel scan | `./test_wifi_caps -a` |
+| `test_uvc_camera` | `src/tests/test_uvc_camera.c` | USB UVC camera enumeration + streaming | `./test_uvc_camera -n 50` |
+| `test_gps` | `src/tests/test_gps.c` | GPS NMEA parser, Haversine, RTH functions | `./test_gps [dev] [baud]` |
+| `test_modem` | `src/tests/test_modem.c` | 4G/5G modem detection, AT, signal, connect | `./test_modem info` |
 
 Deploy any binary with:
 
@@ -351,15 +453,21 @@ FRAME  FX       FY       QUAL   LOOM   ASYM   CONF
 #### "FATAL: kernel too old" Fix
 This error occurs when a statically-linked binary built with a modern glibc (≥2.31, Ubuntu 22.04's `arm-linux-gnueabi`) runs on the drone's 2.6.32.9 kernel. The glibc checks `uname()` at startup and refuses to run if the kernel is older than its `--enable-kernel` target (typically 3.2.0 for modern distros).
 
-**Solution**: Use the **Parrot 2012.03 soft-float toolchain** (`arm-none-linux-gnueabi-`, kernel min 2.6.16):
+**Solution**: Use the **Parrot 2012.03 soft-float toolchain** (`arm-none-linux-gnueabi-`, kernel min 2.6.16) with **dynamic linking** (not static — static causes segfaults on drone):
 
 ```makefile
 SOFT_CC = /opt/arm-2012.03/bin/arm-none-linux-gnueabi-gcc
-SOFT_CFLAGS = -mcpu=cortex-a8 -mfloat-abi=soft -std=gnu99
-SOFT_LDFLAGS = -static -static-libgcc -lm -lrt -Wl,--gc-sections
+SOFT_CFLAGS = -marm -march=armv7-a -mtune=cortex-a8 -mfpu=neon \
+              -mfloat-abi=softfp -Os -std=gnu99
+SOFT_LDFLAGS = -static-libgcc -lm -lrt \
+              -Wl,--dynamic-linker=/lib/ld-linux.so.3 -Wl,-rpath,/lib
 ```
 
-Produces: `statically linked, for GNU/Linux 2.6.16` — runs on drone's 2.6.32.9.
+Produces: `ELF 32-bit LSB executable, ARM, version 1 (SYSV), dynamically linked (uses shared libs), for GNU/Linux 2.6.16` — confirmed working on drone.
+
+Key required shared libs (all on drone): `libm.so.6`, `librt.so.1`, `libc.so.6`, `libgcc_s.so.1` (from `-static-libgcc`).
+
+**NEVER use `-static` for on-drone binaries** — all 22 research repos confirmed this causes segfault.
 
 #### Segfault Isolation
 If a test binary segfaults on the drone, start with `test_minimal`:
@@ -369,7 +477,7 @@ Usage: test_minimal
 It only prints "Hello from drone!" and creates a UDP socket. If this works, the issue is in the test program code, not the toolchain.
 
 #### Test Programs vs. GStreamer Plugin
-- On-drone test programs (`test_connection`, `test_camera`, etc.) use the **soft-float** toolchain and must be **statically linked**.
+- On-drone test programs (`test_connection`, `test_camera`, etc.) use the **soft-float** toolchain with **dynamic linking** (not static).
 - The H.264 encoder pipeline (`drone_encoder`, `libgstparrot_enc.so`) uses the **hard-float** toolchain (Linaro 2016.02) with TI Codec Engine undefined symbols resolved at runtime.
 
 ### Known Quirks
@@ -377,3 +485,17 @@ It only prints "Hello from drone!" and creates a UDP socket. If this works, the 
 - `/opt/arm/tidsp-binaries*` does NOT exist by default — DSP firmware must be uploaded and bind-mounted
 - `/opt/arm/gst/` does NOT exist by default — GStreamer ARM binaries must be uploaded
 - USB camera detected (`Sonix Technology Co., Ltd. ID 0c45:6366`) but no UVC driver in kernel — won't appear as `/dev/video*`
+
+### USB Serial / GPS / Modem Quirks
+- No `usbserial.ko` in stock kernel — must be cross-compiled and insmod'd
+- GPS (via PL2303/CP210x/FTDI) → `/dev/ttyUSB0` after insmod `usbserial.ko` + `pl2303.ko` (or cp210x/ftdi_sio)
+- 4G modem (Huawei E3372) → `eth1` after insmod `usbnet.ko` + `cdc_ether.ko`
+- Some 4G modems may present as `cdc_ncm` or `qmi_wwan` — compile both
+- Modem AT commands on `/dev/ttyUSB0` (or `/dev/ttyACM0`) after `cdc_acm.ko`
+- Parrot NMEA GPS Flight Recorder (ID 19CF:3000) uses `cp210x.ko` driver
+- u-blox NEO-6M/8M via USB-serial → PL2303 or CP210x
+
+### Hardware Upgrade Paths (see docs/hardware-upgrades.md)
+- **Budget** ($55): u-blox NEO-6M GPS + TP-Link WN722N + Arduino Nano
+- **Mid** ($175): u-blox NEO-M8N + Alfa AWUS036NHA + ESP32 + TFmini LiDAR
+- **Premium** ($500): u-blox SAM-M8Q + Alfa AWUS036ACH + 4G modem + RPLidar + FLIR

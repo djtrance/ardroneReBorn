@@ -9,6 +9,18 @@ VISION_DIR := $(SRC_DIR)/vision
 VISION_SRCS := $(wildcard $(VISION_DIR)/*.c)
 VISION_OBJS := $(patsubst $(VISION_DIR)/%.c, $(OBJ_DIR)/vision/%.o, $(VISION_SRCS))
 
+NAV_DIR := $(SRC_DIR)/navigation
+NAV_SRCS := $(wildcard $(NAV_DIR)/*.c)
+NAV_OBJS := $(patsubst $(NAV_DIR)/%.c, $(OBJ_DIR)/navigation/%.o, $(NAV_SRCS))
+
+NET_DIR := $(SRC_DIR)/network
+NET_SRCS := $(wildcard $(NET_DIR)/*.c)
+NET_OBJS := $(patsubst $(NET_DIR)/%.c, $(OBJ_DIR)/network/%.o, $(NET_SRCS))
+
+DET_DIR := $(SRC_DIR)/detection
+DET_SRCS := $(wildcard $(DET_DIR)/*.c)
+DET_OBJS := $(patsubst $(DET_DIR)/%.c, $(OBJ_DIR)/detection/%.o, $(DET_SRCS))
+
 TARGET := $(BIN_DIR)/drone_encoder
 
 SRCS := $(filter-out $(SRC_DIR)/gst_plugin.c $(SRC_DIR)/dsp_init_main.c $(wildcard $(TEST_DIR)/*.c), $(wildcard $(SRC_DIR)/*.c))
@@ -24,17 +36,35 @@ $(OBJ_DIR):
 $(OBJ_DIR)/vision:
 	mkdir -p $(OBJ_DIR)/vision
 
+$(OBJ_DIR)/navigation:
+	mkdir -p $(OBJ_DIR)/navigation
+
+$(OBJ_DIR)/network:
+	mkdir -p $(OBJ_DIR)/network
+
+$(OBJ_DIR)/detection:
+	mkdir -p $(OBJ_DIR)/detection
+
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
-	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(SRC_DIR) -c $< -o $@
+	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(NAV_DIR) -I$(NET_DIR) -I$(DET_DIR) -I$(SRC_DIR) -c $< -o $@
 
 $(OBJ_DIR)/vision/%.o: $(VISION_DIR)/%.c | $(OBJ_DIR)/vision
-	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(SRC_DIR) -c $< -o $@
+	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(NAV_DIR) -I$(NET_DIR) -I$(DET_DIR) -I$(SRC_DIR) -c $< -o $@
 
-$(TARGET): $(OBJS) $(VISION_OBJS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(OBJS) $(VISION_OBJS) -o $@ $(LDFLAGS) \
+$(OBJ_DIR)/navigation/%.o: $(NAV_DIR)/%.c | $(OBJ_DIR)/navigation
+	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(NAV_DIR) -I$(NET_DIR) -I$(DET_DIR) -I$(SRC_DIR) -c $< -o $@
+
+$(OBJ_DIR)/network/%.o: $(NET_DIR)/%.c | $(OBJ_DIR)/network
+	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(NAV_DIR) -I$(NET_DIR) -I$(DET_DIR) -I$(SRC_DIR) -c $< -o $@
+
+$(OBJ_DIR)/detection/%.o: $(DET_DIR)/%.c | $(OBJ_DIR)/detection
+	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(NAV_DIR) -I$(NET_DIR) -I$(DET_DIR) -I$(SRC_DIR) -c $< -o $@
+
+$(TARGET): $(OBJS) $(VISION_OBJS) $(NAV_OBJS) $(NET_OBJS) $(DET_OBJS) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(OBJS) $(VISION_OBJS) $(NAV_OBJS) $(NET_OBJS) $(DET_OBJS) -o $@ $(LDFLAGS) \
 		-Wl,--unresolved-symbols=ignore-in-object-files
 	$(STRIP) $@
 	@echo "=== Build complete: $(TARGET) ==="
@@ -100,8 +130,35 @@ $(BIN_DIR)/test_minimal: $(TEST_DIR)/test_minimal.c | $(BIN_DIR)
 	$(SOFT_CC) $(SOFT_CFLAGS) $^ -o $@ $(SOFT_LDFLAGS)
 	@echo "=== Built: $@ ==="
 
+# test_wifi_caps: WiFi capability test (monitor mode, raw sockets, channels)
+$(BIN_DIR)/test_wifi_caps: $(TEST_DIR)/test_wifi_caps.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS)
+	@echo "=== Built: $@ ==="
+
+# test_uvc_camera: USB UVC camera via libusb
+# Note: libusb symbols resolved at runtime (drone has libusb-1.0.so)
+$(BIN_DIR)/test_uvc_camera: $(TEST_DIR)/test_uvc_camera.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS) \
+		-Wl,--unresolved-symbols=ignore-in-object-files
+	@echo "=== Built: $@ ==="
+
+# test_gps: GPS NMEA parser test
+$(BIN_DIR)/test_gps: $(TEST_DIR)/test_gps.c $(NAV_DIR)/gps.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(NAV_DIR) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS) -lm
+	@echo "=== Built: $@ ==="
+
+# test_modem: 4G modem control test
+$(BIN_DIR)/test_modem: $(TEST_DIR)/test_modem.c $(NET_DIR)/modem.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(NET_DIR) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS) -lm
+	@echo "=== Built: $@ ==="
+
+# skyproxy: Skycontroller 2 <-> AR.Drone bridge
+$(BIN_DIR)/skyproxy: $(NET_DIR)/skyproxy.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(NET_DIR) -I$(SRC_DIR) $< -o $@ $(SOFT_LDFLAGS) -lpthread -lm
+	@echo "=== Built: $@ ==="
+
 # Build all test programs
-tests: $(BIN_DIR)/test_minimal $(BIN_DIR)/test_connection $(BIN_DIR)/test_camera $(BIN_DIR)/test_vision $(BIN_DIR)/test_stream
+tests: $(BIN_DIR)/test_minimal $(BIN_DIR)/test_connection $(BIN_DIR)/test_camera $(BIN_DIR)/test_vision $(BIN_DIR)/test_stream $(BIN_DIR)/test_wifi_caps $(BIN_DIR)/test_uvc_camera $(BIN_DIR)/test_gps $(BIN_DIR)/test_modem $(BIN_DIR)/skyproxy
 
 # Size stats
 size: $(TARGET)
