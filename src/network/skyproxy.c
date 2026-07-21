@@ -104,12 +104,12 @@ static int udp_connect(const char *ip, int port) {
 }
 
 static void at_send(const char *fmt, ...) {
-    char buf[256];
+    char buf[1024];
     va_list args;
     va_start(args, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    if (n > 0)
+    if (n > 0 && n < (int)sizeof(buf))
         sendto(at_sock, buf, n, 0, (struct sockaddr*)&at_addr, sizeof(at_addr));
 }
 
@@ -192,13 +192,19 @@ typedef struct __attribute__((packed)) {
 } navdata_gps_t;
 
 static void send_to_client(uint8_t *buf, int len) {
-    if (!buf || len <= 0) return;
+    if (!buf || len <= 0 || vid_out < 0) return;
     pthread_mutex_lock(&g_lock);
     int ready = g_shared.client_ready;
     struct sockaddr_in dest = g_shared.d2c_addr;
     pthread_mutex_unlock(&g_lock);
     if (!ready) return;
-    sendto(vid_out, buf, len, 0, (struct sockaddr*)&dest, sizeof(dest));
+    int ret = sendto(vid_out, buf, len, MSG_DONTWAIT,
+                     (struct sockaddr*)&dest, sizeof(dest));
+    if (ret < 0 && errno == EAGAIN) {
+        static int rate_limit = 0;
+        if (++rate_limit % 100 == 1)
+            fprintf(stderr, "send_to_client: EAGAIN (buffer full, %d bytes dropped)\n", len);
+    }
 }
 
 static void send_events(const telemetry_t *tel) {
@@ -351,7 +357,7 @@ static void *command_thread(void *arg) {
         ret_pcmd = -1;
         frame_count++;
 
-        if (cmd_data[0] == ARDRONE3_PROJECT)
+        if (cmd_len > 0 && cmd_data[0] == ARDRONE3_PROJECT)
             ret_pcmd = try_parse_arsdk3(cmd_data, cmd_len, &joy);
         if (ret_pcmd < 0)
             ret_pcmd = try_parse_raw_pcmd(cmd_data, cmd_len, &joy);
@@ -388,8 +394,6 @@ static void *navdata_thread(void *arg) {
         int ret = select(nav_sock + 1, &fds, NULL, NULL, &tv);
         uint64_t now = gettime_ms();
 
-        at_comwdg();
-
         if (ret <= 0) continue;
 
         from_len = sizeof(from);
@@ -418,22 +422,30 @@ static void *navdata_thread(void *arg) {
                 tel.theta    = d->theta / 1000.0f;
                 tel.psi      = d->psi   / 1000.0f;
             }
-            if (tag == 27 && (unsigned int)size >= sizeof(navdata_gps_t) - 200) {
-                navdata_gps_t *g = (navdata_gps_t*)&buf[offset];
-                if (g->gps_plugged && g->gps_fix > 0) {
-                    tel.gps_fix    = g->gps_fix;
-                    tel.lat        = g->lat;
-                    tel.lon        = g->lon;
-                    tel.gps_alt    = g->elevation;
-                    tel.gps_speed  = g->speed;
-                    tel.gps_bearing = g->degree;
-                    tel.satellites = g->num_satellites;
-                    pthread_mutex_lock(&g_lock);
-                    g_shared.gps_fix = g->gps_fix;
-                    pthread_mutex_unlock(&g_lock);
-                } else {
-                    tel.gps_fix = 0;
+            if (tag == 27 && (unsigned int)size >= 220) {
+                const uint8_t *g = buf + offset;
+                int32_t gps_plugged;
+                memcpy(&gps_plugged, g + 196, 4);
+                if (gps_plugged && size >= 320) {
+                    uint8_t gps_fix = g[318];
+                    if (gps_fix > 0) {
+                        double dval;
+                        tel.gps_fix = gps_fix;
+                        memcpy(&tel.lat, g + 4, 8);
+                        memcpy(&tel.lon, g + 12, 8);
+                        memcpy(&dval, g + 20, 8);
+                        tel.gps_alt = (float)dval;
+                        memcpy(&tel.gps_speed, g + 140, 4);
+                        memcpy(&tel.gps_bearing, g + 148, 4);
+                        tel.satellites = g[319];
+                        pthread_mutex_lock(&g_lock);
+                        g_shared.gps_fix = gps_fix;
+                        pthread_mutex_unlock(&g_lock);
+                        goto gps_done;
+                    }
                 }
+                tel.gps_fix = 0;
+                gps_done: ;
             }
             offset += size;
             if (offset % 4) offset += 4 - (offset % 4);
@@ -501,11 +513,6 @@ static void *video_relay_thread(void *arg) {
     fd_set fds;
     struct timeval tv;
 
-    vid_out = socket(AF_INET, SOCK_DGRAM, 0);
-    if (vid_out < 0) { perror("vid_out socket"); return NULL; }
-    int sndbuf = 262144;
-    setsockopt(vid_out, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
-
     vid_buf = malloc(VIDEO_BUF_SIZE);
     fu_buf = malloc(VIDEO_BUF_SIZE);
     if (!vid_buf || !fu_buf) {
@@ -553,6 +560,13 @@ static void *video_relay_thread(void *arg) {
     int nal_offsets[256];
     uint16_t arstream_frame_num = 0;
     const int ARSTREAM_FRAG_SIZE = 64000; /* max fragment size */
+
+    uint8_t *arstream_buf = malloc(66000);
+    if (!arstream_buf) {
+        fprintf(stderr, "Video relay: OOM for arstream_buf\n");
+        free(buf); close(vid_out); free(vid_buf); free(fu_buf);
+        return NULL;
+    }
 
     while (running) {
         FD_ZERO(&fds);
@@ -602,7 +616,6 @@ static void *video_relay_thread(void *arg) {
         pthread_mutex_unlock(&g_lock);
         if (!connected || !client_ready) continue;
 
-        uint8_t arstream_buf[66000];
         int is_rtp = (n > 12 && (buf[0] & 0xC0) == 0x80);
 
         if (is_rtp) {
@@ -887,9 +900,9 @@ static void *video_relay_thread(void *arg) {
     free(buf);
     free(vid_buf); vid_buf = NULL;
     free(fu_buf); fu_buf = NULL;
+    free(arstream_buf);
     for (int i = 0; i < n_srcs; i++)
         if (srcs[i].fd >= 0) close(srcs[i].fd);
-    if (vid_out >= 0) close(vid_out);
     return NULL;
 }
 
@@ -1107,6 +1120,11 @@ int main(int argc, char **argv) {
     nav_sock = udp_bind(NAVDATA_PORT);
     if (nav_sock < 0) { close(sc_sock); close(at_sock); return 1; }
 
+    vid_out = socket(AF_INET, SOCK_DGRAM, 0);
+    if (vid_out < 0) { perror("vid_out socket"); close(sc_sock); close(at_sock); close(nav_sock); return 1; }
+    int sndbuf = 262144;
+    setsockopt(vid_out, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
     at_config("general:navdata_demo", "FALSE");
     at_config("general:navdata_options", "777060865");
     at_config("gps:latitude", "0.0");
@@ -1153,6 +1171,8 @@ int main(int argc, char **argv) {
     close(sc_sock);
     close(at_sock);
     close(nav_sock);
+    if (vid_out >= 0) close(vid_out);
+    vid_out = -1;
 
     printf("Stats: %llu commands, %llu video frames, %llu KB sent\n",
            (unsigned long long)cmd_count,
