@@ -153,8 +153,8 @@ $(BIN_DIR)/test_modem: $(TEST_DIR)/test_modem.c $(NET_DIR)/modem.c | $(BIN_DIR)
 	@echo "=== Built: $@ ==="
 
 # skyproxy: Skycontroller 2 <-> AR.Drone bridge
-$(BIN_DIR)/skyproxy: $(NET_DIR)/skyproxy.c | $(BIN_DIR)
-	$(SOFT_CC) $(SOFT_CFLAGS) -I$(NET_DIR) -I$(SRC_DIR) $< -o $@ $(SOFT_LDFLAGS) -lpthread -lm
+$(BIN_DIR)/skyproxy: $(NET_DIR)/skyproxy.c $(NET_DIR)/mdns.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(NET_DIR) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS) -lpthread -lm
 	@echo "=== Built: $@ ==="
 
 # Build all test programs

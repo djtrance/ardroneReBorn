@@ -14,6 +14,7 @@
 #include <time.h>
 
 #include "skyproxy.h"
+#include "mdns.h"
 
 static volatile int running = 1;
 
@@ -682,10 +683,11 @@ int main(int argc, char **argv) {
     at_comwdg();
     usleep(50000);
 
-    pthread_t cmd_thr, nav_thr, vid_thr;
+    pthread_t cmd_thr, nav_thr, vid_thr, mdns_thr;
     pthread_create(&cmd_thr, NULL, command_thread, NULL);
     pthread_create(&nav_thr, NULL, navdata_thread, NULL);
     pthread_create(&vid_thr, NULL, video_relay_thread, NULL);
+    pthread_create(&mdns_thr, NULL, mdns_thread, NULL);
 
     printf("\nProxy running. Connect Skycontroller 2 to drone WiFi\n");
     printf("(SSID: ardrone2_xxxx) and launch FreeFlight Pro.\n\n");
@@ -704,9 +706,11 @@ int main(int argc, char **argv) {
     memset(&zero_joy, 0, sizeof(zero_joy));
     at_pcmd(&zero_joy);
     running = 0;
+    mdns_stop();
     pthread_join(cmd_thr, NULL);
     pthread_join(nav_thr, NULL);
     pthread_join(vid_thr, NULL);
+    pthread_join(mdns_thr, NULL);
     close(sc_sock);
     close(at_sock);
     close(nav_sock);

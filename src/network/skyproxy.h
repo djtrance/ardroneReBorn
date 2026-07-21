@@ -17,6 +17,7 @@
 #define PILOTING_CLASS    0x00
 
 #define NAVDATA_BUF_SIZE  4096
+#define DRONE_IP          "192.168.1.1"
 #define VIDEO_BUF_SIZE    131072
 #define MAX_SPS_PPS       128
 
