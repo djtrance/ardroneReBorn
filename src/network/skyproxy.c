@@ -115,19 +115,53 @@ static void at_config(const char *key, const char *val) {
     at_send("AT*CONFIG=%d,\"%s\",\"%s\"\r", at_seq++, key, val);
 }
 
+typedef struct __attribute__((packed)) {
+    uint16_t tag;
+    uint16_t size;
+    double   latitude;
+    double   longitude;
+    double   altitude_ell;
+    double   altitude_msl;
+    float    hdop;
+    float    vdop;
+    float    speed;
+    uint8_t  fix_status;
+    uint8_t  satellites;
+    uint16_t year;
+    uint8_t  month;
+    uint8_t  day;
+    uint8_t  hour;
+    uint8_t  min;
+    uint8_t  sec;
+    uint8_t  padding[7];
+} navdata_gps_t;
+
 static int send_telemetry(const telemetry_t *tel) {
     if (!sc_connected) return -1;
     char buf[512];
-    int n = snprintf(buf, sizeof(buf),
-        "{"
-        "\"bat\":%d,"
-        "\"alt\":%.1f,"
-        "\"vx\":%.2f,\"vy\":%.2f,\"vz\":%.2f,"
-        "\"phi\":%.2f,\"theta\":%.2f,\"psi\":%.2f"
-        "}\n",
-        tel->battery, tel->altitude,
-        tel->vx, tel->vy, tel->vz,
-        tel->phi, tel->theta, tel->psi);
+    int n;
+    if (tel->gps_fix)
+        n = snprintf(buf, sizeof(buf),
+            "{\"bat\":%d,\"alt\":%.1f,"
+            "\"vx\":%.2f,\"vy\":%.2f,\"vz\":%.2f,"
+            "\"phi\":%.2f,\"theta\":%.2f,\"psi\":%.2f"
+            ",\"lat\":%.6f,\"lon\":%.6f,"
+            "\"gps_alt\":%.1f,\"gps_spd\":%.1f,"
+            "\"gps_brg\":%.1f,\"sat\":%d}\n",
+            tel->battery, tel->altitude,
+            tel->vx, tel->vy, tel->vz,
+            tel->phi, tel->theta, tel->psi,
+            tel->lat, tel->lon,
+            tel->gps_alt, tel->gps_speed,
+            tel->gps_bearing, tel->satellites);
+    else
+        n = snprintf(buf, sizeof(buf),
+            "{\"bat\":%d,\"alt\":%.1f,"
+            "\"vx\":%.2f,\"vy\":%.2f,\"vz\":%.2f,"
+            "\"phi\":%.2f,\"theta\":%.2f,\"psi\":%.2f}\n",
+            tel->battery, tel->altitude,
+            tel->vx, tel->vy, tel->vz,
+            tel->phi, tel->theta, tel->psi);
 
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
@@ -277,6 +311,19 @@ static void *navdata_thread(void *arg) {
                 tel.psi      = d->psi   / 1000.0f;
                 send_telemetry(&tel);
             }
+            if (tag == 7 && (unsigned int)size >= 56) {
+                navdata_gps_t *g = (navdata_gps_t*)&buf[offset];
+                if (g->fix_status > 0) {
+                    tel.gps_fix    = g->fix_status;
+                    tel.lat        = g->latitude;
+                    tel.lon        = g->longitude;
+                    tel.gps_alt    = g->altitude_msl;
+                    tel.gps_speed  = g->speed;
+                    tel.satellites = g->satellites;
+                } else {
+                    tel.gps_fix = 0;
+                }
+            }
             offset += size;
             if (offset % 4) offset += 4 - (offset % 4);
         }
@@ -307,31 +354,65 @@ static void send_video(const uint8_t *data, int len) {
     video_bytes += len;
 }
 
+static int tcp_connect(const char *ip, int port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr(ip);
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+typedef struct {
+    int fd;
+    int type;    // 0=TCP, 1=UDP, 2=RTP
+    int port;
+} video_src_t;
+
 static void *video_relay_thread(void *arg) {
     (void)arg;
-    int vid_in = -1;
-    int vid_in2 = -1;
     uint8_t buf[VIDEO_BUF_SIZE];
     uint8_t sps[MAX_SPS_PPS], pps[MAX_SPS_PPS];
     int sps_len = 0, pps_len = 0;
-    int video_source = 0;
-    int seen_iframe = 0;
     fd_set fds;
     struct timeval tv;
 
     vid_out = socket(AF_INET, SOCK_DGRAM, 0);
     if (vid_out < 0) { perror("vid_out socket"); return NULL; }
 
-    vid_in = udp_bind(VID_SRC_PORT);
-    vid_in2 = udp_bind(VID_SRC_PORT2);
-    if (vid_in < 0 && vid_in2 < 0) {
-        printf("Video relay: no video ports available\n");
+    video_src_t srcs[MAX_VID_SRCS];
+    int n_srcs = 0;
+
+    int tcp_fd = tcp_connect("127.0.0.1", VID_TCP_PORT);
+    if (tcp_fd < 0) tcp_fd = tcp_connect("192.168.1.1", VID_TCP_PORT);
+    if (tcp_fd >= 0) {
+        srcs[n_srcs++] = (video_src_t){ .fd = tcp_fd, .type = 0, .port = VID_TCP_PORT };
+        printf("Video relay: TCP %d connected\n", VID_TCP_PORT);
+    }
+
+    int udp_fd = udp_bind(VID_UDP_PORT);
+    if (udp_fd >= 0)
+        srcs[n_srcs++] = (video_src_t){ .fd = udp_fd, .type = 1, .port = VID_UDP_PORT };
+
+    int rtp_fd = udp_bind(VID_RTP_PORT);
+    if (rtp_fd >= 0)
+        srcs[n_srcs++] = (video_src_t){ .fd = rtp_fd, .type = 2, .port = VID_RTP_PORT };
+
+    if (n_srcs == 0) {
+        printf("Video relay: no video sources available\n");
         close(vid_out); vid_out = -1;
         return NULL;
     }
 
-    printf("Video relay listening on ports %d and %d\n",
-           VID_SRC_PORT, VID_SRC_PORT2);
+    printf("Video relay: %d source(s) active\n", n_srcs);
 
     uint8_t fu_buffer[VIDEO_BUF_SIZE];
     int fu_len = 0;
@@ -340,31 +421,46 @@ static void *video_relay_thread(void *arg) {
     while (running) {
         FD_ZERO(&fds);
         int max_fd = -1;
-        if (vid_in >= 0) { FD_SET(vid_in, &fds); if (vid_in > max_fd) max_fd = vid_in; }
-        if (vid_in2 >= 0) { FD_SET(vid_in2, &fds); if (vid_in2 > max_fd) max_fd = vid_in2; }
+        for (int i = 0; i < n_srcs; i++) {
+            if (srcs[i].fd >= 0) {
+                FD_SET(srcs[i].fd, &fds);
+                if (srcs[i].fd > max_fd) max_fd = srcs[i].fd;
+            }
+        }
+        if (max_fd < 0) break;
         tv.tv_sec = 0; tv.tv_usec = 100000;
 
         int ret = select(max_fd + 1, &fds, NULL, NULL, &tv);
         if (ret <= 0) continue;
 
-        int src_fd = -1;
-        if (vid_in >= 0 && FD_ISSET(vid_in, &fds)) {
-            src_fd = vid_in; video_source = VID_SRC_PORT;
-        } else if (vid_in2 >= 0 && FD_ISSET(vid_in2, &fds)) {
-            src_fd = vid_in2; video_source = VID_SRC_PORT2;
+        int src_idx = -1;
+        for (int i = 0; i < n_srcs; i++) {
+            if (srcs[i].fd >= 0 && FD_ISSET(srcs[i].fd, &fds)) {
+                src_idx = i; break;
+            }
         }
+        if (src_idx < 0) continue;
 
-        if (src_fd < 0) continue;
-
-        struct sockaddr_in from;
-        socklen_t from_len = sizeof(from);
-        int n = recvfrom(src_fd, buf, sizeof(buf), 0,
+        int n = -1;
+        if (srcs[src_idx].type == 0) {
+            n = read(srcs[src_idx].fd, buf, sizeof(buf));
+        } else {
+            struct sockaddr_in from;
+            socklen_t from_len = sizeof(from);
+            n = recvfrom(srcs[src_idx].fd, buf, sizeof(buf), 0,
                          (struct sockaddr*)&from, &from_len);
-        if (n <= 0) continue;
+        }
+        if (n <= 0) {
+            if (srcs[src_idx].type == 0) {
+                printf("Video relay: TCP disconnected\n");
+                close(srcs[src_idx].fd);
+                srcs[src_idx].fd = -1;
+            }
+            continue;
+        }
 
         if (!sc_connected) continue;
 
-        int offset = 0;
         int is_rtp = (n > 12 && (buf[0] & 0xC0) == 0x80);
 
         if (is_rtp) {
@@ -398,9 +494,6 @@ static void *video_relay_thread(void *arg) {
                 }
 
                 if (end && fu_len > 0) {
-                    uint8_t *data_start = fu_buffer;
-                    int data_len = fu_len;
-
                     if (original_nal_type == 5) {
                         if (sps_len > 0 && pps_len > 0) {
                             uint8_t sc4[] = {0,0,0,1};
@@ -409,11 +502,10 @@ static void *video_relay_thread(void *arg) {
                             send_video(sc4, 4);
                             send_video(pps, pps_len);
                         }
-                        seen_iframe = 1;
                     }
                     uint8_t sc3[] = {0,0,0,1};
                     send_video(sc3, 4);
-                    send_video(data_start, data_len);
+                    send_video(fu_buffer, fu_len);
                     video_frames++;
                     fu_len = 0;
                 }
@@ -437,7 +529,6 @@ static void *video_relay_thread(void *arg) {
                         send_video(sc4, 4);
                         send_video(pps, pps_len);
                     }
-                    seen_iframe = 1;
                 }
                 uint8_t sc3[] = {0,0,0,1};
                 send_video(sc3, 4);
@@ -448,7 +539,7 @@ static void *video_relay_thread(void *arg) {
             int sc_len;
             int sc_pos = find_nal(buf, n, &sc_len);
             if (sc_pos < 0) continue;
-            offset = sc_pos;
+            int offset = sc_pos;
 
             while (offset < n) {
                 int cur_sc_len;
@@ -486,19 +577,17 @@ static void *video_relay_thread(void *arg) {
                         send_video(sc, 4);
                         send_video(pps, pps_len);
                     }
-                    seen_iframe = 1;
                 }
 
                 send_video(buf + nal_pos, nal_data_len);
                 video_frames++;
-
                 offset = nal_end;
             }
         }
     }
 
-    if (vid_in >= 0) close(vid_in);
-    if (vid_in2 >= 0) close(vid_in2);
+    for (int i = 0; i < n_srcs; i++)
+        if (srcs[i].fd >= 0) close(srcs[i].fd);
     if (vid_out >= 0) close(vid_out);
     return NULL;
 }
@@ -540,7 +629,8 @@ int main(int argc, char **argv) {
     printf("=== Skycontroller 2 <-> AR.Drone Proxy ===\n");
     printf("Drone IP: %s\n", drone_ip);
     printf("Listening for Skycontroller on port %d\n", sc_port);
-    printf("Video relay: %d/%d -> %d\n", VID_SRC_PORT, VID_SRC_PORT2, VID_DST_PORT);
+    printf("Video relay: TCP %d / UDP %d / RTP %d -> %d\n",
+           VID_TCP_PORT, VID_UDP_PORT, VID_RTP_PORT, VID_DST_PORT);
     printf("Telemetry on port %d\n", SC_TELEM_PORT);
 
     sc_sock = udp_bind(sc_port);

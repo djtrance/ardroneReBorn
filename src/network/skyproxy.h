@@ -3,13 +3,15 @@
 
 #include <stdint.h>
 
-#define SC_PORT       54321
-#define SC_TELEM_PORT 55004
-#define AT_PORT       5556
-#define NAVDATA_PORT  5554
-#define VID_SRC_PORT  5555
-#define VID_SRC_PORT2 5000
-#define VID_DST_PORT  55004
+#define SC_PORT        54321
+#define SC_TELEM_PORT  55004
+#define AT_PORT        5556
+#define NAVDATA_PORT   5554
+#define VID_TCP_PORT   5555
+#define VID_UDP_PORT   5555
+#define VID_RTP_PORT   5000
+#define VID_DST_PORT   55004
+#define MAX_VID_SRCS   4
 
 #define ARDRONE3_PROJECT  0x01
 #define PILOTING_CLASS    0x00
@@ -46,6 +48,12 @@ typedef struct {
     float altitude;
     float vx, vy, vz;
     float phi, theta, psi;
+    int   gps_fix;
+    double lat, lon;
+    float gps_alt;
+    float gps_speed;
+    float gps_bearing;
+    int   satellites;
 } telemetry_t;
 
 #endif
