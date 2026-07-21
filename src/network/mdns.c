@@ -16,7 +16,7 @@
 #define MDNS_PORT     5353
 #define MDNS_GROUP    "224.0.0.251"
 #define MDNS_TTL      120
-#define BEBOP_PORT    54321
+#define BEBOP_PORT    44444
 
 static int mdns_sock = -1;
 static volatile int mdns_running = 0;

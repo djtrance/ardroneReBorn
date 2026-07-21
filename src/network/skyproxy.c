@@ -16,6 +16,7 @@
 #include "skyproxy.h"
 #include "mdns.h"
 #include "recovery.h"
+#include "arsdk3_proto.h"
 
 static volatile int running = 1;
 
@@ -39,6 +40,14 @@ static struct {
     struct sockaddr_in sc_addr;
     int sc_connected;
     int gps_fix;
+    /* ARSDK3 protocol state */
+    struct sockaddr_in d2c_addr;   /* phone's IP + d2c_port for data */
+    int client_ready;             /* set after TCP handshake */
+    uint8_t vid_seq;              /* ARStream frame sequence counter */
+    uint16_t arstream_frame_num;  /* incrementing ARStream frame number */
+    uint8_t arnet_cmd_seq;        /* sequence number for command frames */
+    uint8_t arnet_evt_seq;        /* sequence number for event frames */
+    uint8_t arnet_vid_seq;        /* sequence number for video frames */
 } g_shared;
 
 static recovery_t g_recovery;
@@ -182,43 +191,51 @@ typedef struct __attribute__((packed)) {
     float    pressure;
 } navdata_gps_t;
 
-static void send_telemetry(const telemetry_t *tel) {
+static void send_to_client(uint8_t *buf, int len) {
+    if (!buf || len <= 0) return;
     pthread_mutex_lock(&g_lock);
-    int connected = g_shared.sc_connected;
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family = AF_INET;
-    dest.sin_port = htons(SC_TELEM_PORT);
-    dest.sin_addr.s_addr = g_shared.sc_addr.sin_addr.s_addr;
+    int ready = g_shared.client_ready;
+    struct sockaddr_in dest = g_shared.d2c_addr;
+    pthread_mutex_unlock(&g_lock);
+    if (!ready) return;
+    sendto(vid_out, buf, len, 0, (struct sockaddr*)&dest, sizeof(dest));
+}
+
+static void send_events(const telemetry_t *tel) {
+    uint8_t buf[1024];
+    int n;
+
+    pthread_mutex_lock(&g_lock);
+    uint8_t seq = g_shared.arnet_evt_seq++;
     pthread_mutex_unlock(&g_lock);
 
-    if (!connected) return;
-    char buf[512];
-    int n;
-    if (tel->gps_fix)
-        n = snprintf(buf, sizeof(buf),
-            "{\"bat\":%d,\"alt\":%.1f,"
-            "\"vx\":%.2f,\"vy\":%.2f,\"vz\":%.2f,"
-            "\"phi\":%.2f,\"theta\":%.2f,\"psi\":%.2f"
-            ",\"lat\":%.6f,\"lon\":%.6f,"
-            "\"gps_alt\":%.1f,\"gps_spd\":%.1f,"
-            "\"gps_brg\":%.1f,\"sat\":%d}\n",
-            tel->battery, tel->altitude,
-            tel->vx, tel->vy, tel->vz,
-            tel->phi, tel->theta, tel->psi,
-            tel->lat, tel->lon,
-            tel->gps_alt, tel->gps_speed,
-            tel->gps_bearing, tel->satellites);
-    else
-        n = snprintf(buf, sizeof(buf),
-            "{\"bat\":%d,\"alt\":%.1f,"
-            "\"vx\":%.2f,\"vy\":%.2f,\"vz\":%.2f,"
-            "\"phi\":%.2f,\"theta\":%.2f,\"psi\":%.2f}\n",
-            tel->battery, tel->altitude,
-            tel->vx, tel->vy, tel->vz,
-            tel->phi, tel->theta, tel->psi);
+    n = build_battery_event(buf, sizeof(buf), seq, tel->battery);
+    if (n > 0) send_to_client(buf, n);
 
-    sendto(vid_out, buf, n, 0, (struct sockaddr*)&dest, sizeof(dest));
+    n = build_attitude_event(buf, sizeof(buf), seq + 1,
+                              tel->phi, tel->theta, tel->psi);
+    if (n > 0) send_to_client(buf, n);
+
+    n = build_altitude_event(buf, sizeof(buf), seq + 2, (double)tel->altitude);
+    if (n > 0) send_to_client(buf, n);
+
+    n = build_speed_event(buf, sizeof(buf), seq + 3,
+                           tel->vx, tel->vy, tel->vz);
+    if (n > 0) send_to_client(buf, n);
+
+    if (tel->gps_fix) {
+        n = build_gps_position_event(buf, sizeof(buf), seq + 4,
+                                      tel->lat, tel->lon, tel->gps_alt);
+        if (n > 0) send_to_client(buf, n);
+    }
+
+    int flying = 0;
+    if (tel->altitude > 20.0f) flying = 1;
+    n = build_flying_state_event(buf, sizeof(buf), seq + 5, flying);
+    if (n > 0) send_to_client(buf, n);
+
+    n = build_wifi_signal_event(buf, sizeof(buf), seq + 6, -50);
+    if (n > 0) send_to_client(buf, n);
 }
 
 static int try_parse_arsdk3(const uint8_t *data, int len, joystick_t *joy) {
@@ -303,7 +320,7 @@ static void *command_thread(void *arg) {
                    sizeof(struct in_addr)) != 0) {
             g_shared.sc_addr = from;
             g_shared.sc_connected = 1;
-            printf("Paired with Skycontroller: %s:%d\n",
+            printf("Paired with client: %s:%d\n",
                    inet_ntoa(from.sin_addr), ntohs(from.sin_port));
             joystick_t zero_joy;
             memset(&zero_joy, 0, sizeof(zero_joy));
@@ -312,14 +329,32 @@ static void *command_thread(void *arg) {
         g_shared.last_sc_cmd_ms = now;
         pthread_mutex_unlock(&g_lock);
 
+        const uint8_t *cmd_data = buf;
+        int cmd_len = n;
+
+        uint8_t frame_type = 0, frame_id = 0, frame_seq = 0;
+        int payload_off = 0, payload_len = 0;
+
+        if (n >= 7) {
+            if (parse_arnet_frame(buf, n, &frame_type, &frame_id,
+                                   &frame_seq, &payload_off, &payload_len) == 0) {
+                if (frame_id == ARNET_BUF_COMMAND) {
+                    cmd_data = buf + payload_off;
+                    cmd_len = payload_len;
+                } else if (frame_id == ARNET_VIDEO_ACK_ID) {
+                    continue;
+                }
+            }
+        }
+
         memset(&joy, 0, sizeof(joy));
         ret_pcmd = -1;
         frame_count++;
 
-        if (buf[0] == ARDRONE3_PROJECT)
-            ret_pcmd = try_parse_arsdk3(buf, n, &joy);
+        if (cmd_data[0] == ARDRONE3_PROJECT)
+            ret_pcmd = try_parse_arsdk3(cmd_data, cmd_len, &joy);
         if (ret_pcmd < 0)
-            ret_pcmd = try_parse_raw_pcmd(buf, n, &joy);
+            ret_pcmd = try_parse_raw_pcmd(cmd_data, cmd_len, &joy);
 
         if (ret_pcmd == 0) {
             at_pcmd(&joy);
@@ -406,7 +441,7 @@ static void *navdata_thread(void *arg) {
 
         if (now - last_telem_send > 100) {
             if (memcmp(&tel, &prev_tel, sizeof(tel)) != 0) {
-                send_telemetry(&tel);
+                send_events(&tel);
                 prev_tel = tel;
                 last_telem_send = now;
             }
@@ -434,40 +469,6 @@ static int find_all_nal(const uint8_t *data, int len, int *offsets, int max_nal)
         i++;
     }
     return count;
-}
-
-static void send_video_data(const uint8_t *data, int len, int flush) {
-    static uint8_t *batch = NULL;
-    static int batch_len = 0;
-    if (!batch) batch = vid_buf;
-
-    if (!data || len == 0) {
-        if (flush && batch_len > 0) {
-            pthread_mutex_lock(&g_lock);
-            int connected = g_shared.sc_connected;
-            struct sockaddr_in dest;
-            memset(&dest, 0, sizeof(dest));
-            dest.sin_family = AF_INET;
-            dest.sin_port = htons(VID_DST_PORT);
-            dest.sin_addr.s_addr = g_shared.sc_addr.sin_addr.s_addr;
-            pthread_mutex_unlock(&g_lock);
-            if (connected) {
-                sendto(vid_out, batch, batch_len, 0,
-                       (struct sockaddr*)&dest, sizeof(dest));
-                video_bytes += batch_len;
-            }
-            batch_len = 0;
-        }
-        return;
-    }
-
-    if (batch_len + len > VIDEO_BUF_SIZE) {
-        send_video_data(NULL, 0, 1);
-    }
-    memcpy(batch + batch_len, data, len);
-    batch_len += len;
-    video_frames++;
-    (void)flush;
 }
 
 static int tcp_connect(const char *ip, int port) {
@@ -550,6 +551,8 @@ static void *video_relay_thread(void *arg) {
 
     int fu_len = 0, fu_type = 0;
     int nal_offsets[256];
+    uint16_t arstream_frame_num = 0;
+    const int ARSTREAM_FRAG_SIZE = 64000; /* max fragment size */
 
     while (running) {
         FD_ZERO(&fds);
@@ -594,9 +597,12 @@ static void *video_relay_thread(void *arg) {
 
         pthread_mutex_lock(&g_lock);
         int connected = g_shared.sc_connected;
+        int client_ready = g_shared.client_ready;
+        uint8_t vid_seq = g_shared.arnet_vid_seq++;
         pthread_mutex_unlock(&g_lock);
-        if (!connected) continue;
+        if (!connected || !client_ready) continue;
 
+        uint8_t arstream_buf[66000];
         int is_rtp = (n > 12 && (buf[0] & 0xC0) == 0x80);
 
         if (is_rtp) {
@@ -630,16 +636,68 @@ static void *video_relay_thread(void *arg) {
                 }
 
                 if (end && fu_len > 0) {
-                    uint8_t sc4[] = {0,0,0,1};
-                    if (original_nal_type == 5 && sps_len > 0 && pps_len > 0) {
-                        send_video_data(sc4, 4, 0);
-                        send_video_data(sps, sps_len, 0);
-                        send_video_data(sc4, 4, 0);
-                        send_video_data(pps, pps_len, 0);
+                    int is_idr = (original_nal_type == 5);
+                    int pkt_len;
+                    int frag_idx = 0;
+                    int offset = 0;
+
+                    if (is_idr && sps_len > 0 && pps_len > 0) {
+                        int total_frags = 
+                            ((sps_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE) +
+                            ((pps_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE) +
+                            ((fu_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE);
+
+                        for (int i = 0; i < (sps_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE; i++) {
+                            int chunk = (sps_len - i * ARSTREAM_FRAG_SIZE);
+                            if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                            pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                                vid_seq, arstream_frame_num, 0, frag_idx, total_frags,
+                                sps + i * ARSTREAM_FRAG_SIZE, chunk);
+                            if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                            frag_idx++;
+                        }
+                        for (int i = 0; i < (pps_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE; i++) {
+                            int chunk = (pps_len - i * ARSTREAM_FRAG_SIZE);
+                            if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                            pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                                vid_seq, arstream_frame_num, 0, frag_idx, total_frags,
+                                pps + i * ARSTREAM_FRAG_SIZE, chunk);
+                            if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                            frag_idx++;
+                        }
+
+                        while (offset < fu_len) {
+                            int chunk = fu_len - offset;
+                            if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                            int is_last = (offset + chunk >= fu_len);
+                            pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                                vid_seq, arstream_frame_num, is_last && is_idr ? 1 : 0,
+                                frag_idx, total_frags,
+                                fu_buf + offset, chunk);
+                            if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                            video_bytes += chunk;
+                            offset += chunk;
+                            frag_idx++;
+                        }
+                    } else {
+                        int total_frags = (fu_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE;
+                        while (offset < fu_len) {
+                            int chunk = fu_len - offset;
+                            if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                            int is_last = (offset + chunk >= fu_len);
+                            pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                                vid_seq, arstream_frame_num,
+                                is_last && is_idr ? 1 : 0,
+                                frag_idx, total_frags,
+                                fu_buf + offset, chunk);
+                            if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                            video_bytes += chunk;
+                            offset += chunk;
+                            frag_idx++;
+                        }
                     }
-                    send_video_data(sc4, 4, 0);
-                    send_video_data(fu_buf, fu_len, 0);
-                    send_video_data(NULL, 0, 1);
+                    video_frames++;
+                    arstream_frame_num++;
                     fu_len = 0;
                 }
             } else if (nal_type < 24) {
@@ -652,23 +710,75 @@ static void *video_relay_thread(void *arg) {
                     pps_len = (nal_len < MAX_SPS_PPS) ? nal_len : MAX_SPS_PPS;
                     memcpy(pps, nal, pps_len);
                 }
-                uint8_t sc4[] = {0,0,0,1};
-                if (nal_type == 5) {
-                    if (sps_len > 0 && pps_len > 0) {
-                        send_video_data(sc4, 4, 0);
-                        send_video_data(sps, sps_len, 0);
-                        send_video_data(sc4, 4, 0);
-                        send_video_data(pps, pps_len, 0);
+
+                int is_idr = (nal_type == 5);
+                int pkt_len;
+                int frag_idx = 0;
+                int offset = 0;
+
+                if (is_idr && sps_len > 0 && pps_len > 0) {
+                    int sps_frags = (sps_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE;
+                    int pps_frags = (pps_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE;
+                    int total_frags = sps_frags + pps_frags +
+                        (nal_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE;
+
+                    for (int i = 0; i < sps_frags; i++) {
+                        int chunk = (sps_len - i * ARSTREAM_FRAG_SIZE);
+                        if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                        pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                            vid_seq, arstream_frame_num, 0, frag_idx, total_frags,
+                            sps + i * ARSTREAM_FRAG_SIZE, chunk);
+                        if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                        frag_idx++;
+                    }
+                    for (int i = 0; i < pps_frags; i++) {
+                        int chunk = (pps_len - i * ARSTREAM_FRAG_SIZE);
+                        if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                        pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                            vid_seq, arstream_frame_num, 0, frag_idx, total_frags,
+                            pps + i * ARSTREAM_FRAG_SIZE, chunk);
+                        if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                        frag_idx++;
+                    }
+
+                    while (offset < nal_len) {
+                        int chunk = nal_len - offset;
+                        if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                        int is_last = (offset + chunk >= nal_len);
+                        pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                            vid_seq, arstream_frame_num, is_last && is_idr ? 1 : 0,
+                            frag_idx, total_frags,
+                            nal + offset, chunk);
+                        if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                        video_bytes += chunk;
+                        offset += chunk;
+                        frag_idx++;
+                    }
+                } else {
+                    int total_frags = (nal_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE;
+                    while (offset < nal_len) {
+                        int chunk = nal_len - offset;
+                        if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                        int is_last = (offset + chunk >= nal_len);
+                        pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                            vid_seq, arstream_frame_num,
+                            is_last && is_idr ? 1 : 0,
+                            frag_idx, total_frags,
+                            nal + offset, chunk);
+                        if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                        video_bytes += chunk;
+                        offset += chunk;
+                        frag_idx++;
                     }
                 }
-                send_video_data(sc4, 4, 0);
-                send_video_data(nal, nal_len, 0);
-                send_video_data(NULL, 0, 1);
+                video_frames++;
+                arstream_frame_num++;
             }
         } else {
             int n_nal = find_all_nal(buf, n, nal_offsets, 256);
             if (n_nal == 0) continue;
 
+            int is_idr = 0;
             for (int i = 0; i < n_nal; i++) {
                 int nal_start = nal_offsets[i];
                 int sc_len = (i + 1 < n_nal) ? nal_offsets[i+1] - nal_start : n - nal_start;
@@ -681,19 +791,96 @@ static void *video_relay_thread(void *arg) {
                     pps_len = (sc_len < MAX_SPS_PPS) ? sc_len : MAX_SPS_PPS;
                     memcpy(pps, buf + nal_start, pps_len);
                 }
+                if (nal_type == 5) is_idr = 1;
+            }
 
-                if (nal_type == 5) {
-                    if (sps_len > 0 && pps_len > 0) {
-                        static const uint8_t sc[] = {0,0,0,1};
-                        send_video_data(sc, 4, 0);
-                        send_video_data(sps, sps_len, 0);
-                        send_video_data(sc, 4, 0);
-                        send_video_data(pps, pps_len, 0);
+            if (is_idr && sps_len > 0 && pps_len > 0) {
+                int pkt_len;
+                int frag_idx = 0;
+                int sps_frags = (sps_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE;
+                int pps_frags = (pps_len + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE;
+
+                int total_data = 0;
+                for (int i = 0; i < n_nal; i++) {
+                    int nal_start = nal_offsets[i];
+                    int sc_len = (i + 1 < n_nal) ? nal_offsets[i+1] - nal_start : n - nal_start;
+                    total_data += sc_len;
+                }
+                int vid_frags = (total_data + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE;
+                int total_frags = sps_frags + pps_frags + vid_frags;
+
+                for (int i = 0; i < sps_frags; i++) {
+                    int chunk = (sps_len - i * ARSTREAM_FRAG_SIZE);
+                    if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                    pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                        vid_seq, arstream_frame_num, 0, frag_idx, total_frags,
+                        sps + i * ARSTREAM_FRAG_SIZE, chunk);
+                    if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                    frag_idx++;
+                }
+                for (int i = 0; i < pps_frags; i++) {
+                    int chunk = (pps_len - i * ARSTREAM_FRAG_SIZE);
+                    if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                    pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                        vid_seq, arstream_frame_num, 0, frag_idx, total_frags,
+                        pps + i * ARSTREAM_FRAG_SIZE, chunk);
+                    if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                    frag_idx++;
+                }
+
+                for (int i = 0; i < n_nal; i++) {
+                    int nal_start = nal_offsets[i];
+                    int sc_len = (i + 1 < n_nal) ? nal_offsets[i+1] - nal_start : n - nal_start;
+                    int offset = 0;
+                    while (offset < sc_len) {
+                        int chunk = sc_len - offset;
+                        if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                        int is_last_frag = (i == n_nal - 1 && offset + chunk >= sc_len);
+                        pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                            vid_seq, arstream_frame_num,
+                            is_last_frag && is_idr ? 1 : 0,
+                            frag_idx, total_frags,
+                            buf + nal_start + offset, chunk);
+                        if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                        video_bytes += chunk;
+                        offset += chunk;
+                        frag_idx++;
                     }
                 }
-                send_video_data(buf + nal_start, sc_len, 0);
+                video_frames++;
+                arstream_frame_num++;
+            } else {
+                int total_data = 0;
+                for (int i = 0; i < n_nal; i++) {
+                    int off = nal_offsets[i];
+                    int sc_len = (i + 1 < n_nal) ? nal_offsets[i+1] - off : n - off;
+                    total_data += sc_len;
+                }
+                int total_frags = (total_data + ARSTREAM_FRAG_SIZE - 1) / ARSTREAM_FRAG_SIZE;
+                int frag_idx = 0;
+
+                for (int i = 0; i < n_nal; i++) {
+                    int off = nal_offsets[i];
+                    int sc_len = (i + 1 < n_nal) ? nal_offsets[i+1] - off : n - off;
+                    int nal_offset = 0;
+                    while (nal_offset < sc_len) {
+                        int chunk = sc_len - nal_offset;
+                        if (chunk > ARSTREAM_FRAG_SIZE) chunk = ARSTREAM_FRAG_SIZE;
+                        int is_last_frag = (i == n_nal - 1 && nal_offset + chunk >= sc_len);
+                        int pkt_len = build_arstream_packet(arstream_buf, sizeof(arstream_buf),
+                            vid_seq, arstream_frame_num,
+                            is_last_frag && is_idr ? 1 : 0,
+                            frag_idx, total_frags,
+                            buf + off + nal_offset, chunk);
+                        if (pkt_len > 0) send_to_client(arstream_buf, pkt_len);
+                        video_bytes += chunk;
+                        nal_offset += chunk;
+                        frag_idx++;
+                    }
+                }
+                video_frames++;
+                arstream_frame_num++;
             }
-            send_video_data(NULL, 0, 1);
         }
     }
 
@@ -749,6 +936,125 @@ static void *recovery_task(void *arg) {
     return NULL;
 }
 
+#define HANDSHAKE_PORT 44444
+
+static void *handshake_thread(void *arg) {
+    (void)arg;
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) { perror("handshake socket"); return NULL; }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(HANDSHAKE_PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("handshake bind"); close(sock); return NULL;
+    }
+    if (listen(sock, 1) < 0) {
+        perror("handshake listen"); close(sock); return NULL;
+    }
+
+    printf("ARSDK3 handshake listening on TCP %d\n", HANDSHAKE_PORT);
+
+    fd_set fds;
+    struct timeval tv;
+    char hb[4096];
+
+    while (running) {
+        FD_ZERO(&fds);
+        FD_SET(sock, &fds);
+        tv.tv_sec = 0; tv.tv_usec = 500000;
+        int ret = select(sock + 1, &fds, NULL, NULL, &tv);
+        if (ret <= 0) continue;
+
+        struct sockaddr_in client;
+        socklen_t client_len = sizeof(client);
+        int csock = accept(sock, (struct sockaddr*)&client, &client_len);
+        if (csock < 0) continue;
+
+        printf("Handshake: connection from %s\n", inet_ntoa(client.sin_addr));
+
+        struct timeval rcv_tv = { .tv_sec = 3, .tv_usec = 0 };
+        setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
+
+        int n = read(csock, hb, sizeof(hb) - 1);
+        if (n > 0) {
+            hb[n] = '\0';
+
+            int d2c_port = 0;
+            const char *p = hb;
+            while (*p) {
+                if (*p == '"') {
+                    p++;
+                    const char *key_start = p;
+                    while (*p && *p != '"') p++;
+                    if (*p != '"') break;
+                    int key_len = p - key_start;
+                    p++;
+                    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+                    if (*p == '"') {
+                        p++;
+                        while (*p && *p != '"') p++;
+                        if (*p == '"') p++;
+                    } else if (*p >= '0' && *p <= '9') {
+                        char *end = NULL;
+                        long val = strtol(p, &end, 10);
+                        if (end && end > p) {
+                            if (key_len == 8 && memcmp(key_start, "d2c_port", 8) == 0)
+                                d2c_port = (int)val;
+                            else if (key_len == 9 && memcmp(key_start, "d2c port", 9) == 0)
+                                d2c_port = (int)val;
+                        }
+                        p = end;
+                    } else {
+                        while (*p && *p != ',' && *p != '}') p++;
+                    }
+                } else {
+                    p++;
+                }
+            }
+
+            if (d2c_port > 0 && d2c_port < 65536) {
+                pthread_mutex_lock(&g_lock);
+                g_shared.d2c_addr.sin_family = AF_INET;
+                g_shared.d2c_addr.sin_port = htons(d2c_port);
+                g_shared.d2c_addr.sin_addr = client.sin_addr;
+                g_shared.client_ready = 1;
+
+                if (!g_shared.sc_connected ||
+                    memcmp(&client.sin_addr, &g_shared.sc_addr.sin_addr,
+                           sizeof(struct in_addr)) != 0) {
+                    g_shared.sc_addr = client;
+                    g_shared.sc_addr.sin_port = htons(d2c_port);
+                    g_shared.sc_connected = 1;
+                }
+                pthread_mutex_unlock(&g_lock);
+
+                printf("Handshake: client d2c port = %d\n", d2c_port);
+            }
+
+            const char *response =
+                "{\"status\":0,"
+                "\"c2d_port\":54321,"
+                "\"arstream_fragment_size\":64000,"
+                "\"arstream_fragment_maximum_number\":4,"
+                "\"arstream_max_ack_interval\":-1,"
+                "\"c2d_update_port\":51,"
+                "\"c2d_user_port\":21}";
+            send(csock, response, strlen(response), 0);
+        }
+
+        close(csock);
+    }
+
+    close(sock);
+    return NULL;
+}
+
 static void print_usage(const char *name) {
     fprintf(stderr,
         "Usage: %s [options]\n"
@@ -784,12 +1090,13 @@ int main(int argc, char **argv) {
     memset(&g_shared, 0, sizeof(g_shared));
     recovery_init(&g_recovery);
 
-    printf("=== Skycontroller 2 <-> AR.Drone Proxy ===\n");
+    printf("=== ARSDK3 <-> AR.Drone 2.0 Bridge ===\n");
     printf("Drone IP: %s\n", drone_ip);
-    printf("Listening for Skycontroller on port %d\n", sc_port);
-    printf("Video relay: TCP %d / UDP %d / RTP %d -> %d\n",
-           VID_TCP_PORT, VID_UDP_PORT, VID_RTP_PORT, VID_DST_PORT);
-    printf("Telemetry on port %d\n", SC_TELEM_PORT);
+    printf("Handshake on TCP %d\n", HANDSHAKE_PORT);
+    printf("Listening for commands on UDP %d\n", sc_port);
+    printf("Video relay: TCP %d / UDP %d / RTP %d -> ARStream\n",
+           VID_TCP_PORT, VID_UDP_PORT, VID_RTP_PORT);
+    printf("Events via ARSDK3 protocol\n");
 
     sc_sock = udp_bind(sc_port);
     if (sc_sock < 0) return 1;
@@ -810,19 +1117,20 @@ int main(int argc, char **argv) {
     at_comwdg();
     usleep(50000);
 
-    pthread_t cmd_thr, nav_thr, vid_thr, mdns_thr, rec_thr;
+    pthread_t cmd_thr, nav_thr, vid_thr, mdns_thr, rec_thr, hs_thr;
     pthread_create(&cmd_thr, NULL, command_thread, NULL);
     pthread_create(&nav_thr, NULL, navdata_thread, NULL);
     pthread_create(&vid_thr, NULL, video_relay_thread, NULL);
     pthread_create(&mdns_thr, NULL, mdns_thread, NULL);
     pthread_create(&rec_thr, NULL, recovery_task, NULL);
+    pthread_create(&hs_thr, NULL, handshake_thread, NULL);
 
-    printf("\nProxy running. Connect Skycontroller 2 to drone WiFi\n");
-    printf("(SSID: ardrone2_xxxx) and launch FreeFlight Pro.\n\n");
+    printf("\nBridge running. Connect phone to drone WiFi and launch\n");
+    printf("FreeFlight Pro - it will discover 'Bebop-Reborn'.\n\n");
 
     while (running) {
         usleep(500000);
-        if (verbose && g_shared.sc_connected)
+        if (verbose)
             printf("\rCMDs: %llu | Video frames: %llu (%llu KB) | %s",
                    (unsigned long long)cmd_count,
                    (unsigned long long)video_frames,
@@ -836,6 +1144,7 @@ int main(int argc, char **argv) {
     at_pcmd(&zero_joy);
     running = 0;
     mdns_stop();
+    pthread_join(hs_thr, NULL);
     pthread_join(cmd_thr, NULL);
     pthread_join(nav_thr, NULL);
     pthread_join(vid_thr, NULL);
