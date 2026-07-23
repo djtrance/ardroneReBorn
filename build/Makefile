@@ -184,8 +184,16 @@ $(BIN_DIR)/test_flight: $(TEST_FLIGHT_SRCS) | $(BIN_DIR)
 	$(SOFT_CC) $(SOFT_CFLAGS) -I$(NAV_DIR) -I$(FLIGHT_DIR) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS) -lm
 	@echo "=== Built: $@ ==="
 
+# test_visual_odometry: visual odometry test (camera + essential matrix + position)
+TEST_VO_SRCS := $(TEST_DIR)/test_visual_odometry.c $(SRC_DIR)/video_capture.c \
+                $(VISION_DIR)/visual_odometry.c $(VISION_DIR)/fast_detect.c \
+                $(VISION_DIR)/lk_flow.c $(VISION_DIR)/image.c
+$(BIN_DIR)/test_visual_odometry: $(TEST_VO_SRCS) | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(VISION_DIR) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS) -lm
+	@echo "=== Built: $@ ==="
+
 # Build all test programs
-tests: $(BIN_DIR)/test_minimal $(BIN_DIR)/test_connection $(BIN_DIR)/test_camera $(BIN_DIR)/test_vision $(BIN_DIR)/test_stream $(BIN_DIR)/test_wifi_caps $(BIN_DIR)/test_uvc_camera $(BIN_DIR)/test_gps $(BIN_DIR)/test_modem $(BIN_DIR)/skyproxy $(BIN_DIR)/test_arsdk3_proto $(BIN_DIR)/test_handshake $(BIN_DIR)/test_flight
+tests: $(BIN_DIR)/test_minimal $(BIN_DIR)/test_connection $(BIN_DIR)/test_camera $(BIN_DIR)/test_vision $(BIN_DIR)/test_stream $(BIN_DIR)/test_wifi_caps $(BIN_DIR)/test_uvc_camera $(BIN_DIR)/test_gps $(BIN_DIR)/test_modem $(BIN_DIR)/skyproxy $(BIN_DIR)/test_arsdk3_proto $(BIN_DIR)/test_handshake $(BIN_DIR)/test_flight $(BIN_DIR)/test_visual_odometry
 
 # Size stats
 size: $(TARGET)
