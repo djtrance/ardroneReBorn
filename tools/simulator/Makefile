@@ -43,7 +43,7 @@ test_visual_odometry: $(VO_SRC_TEST:.c=.o)
 test_line_detect: $(LINE_SRC_TEST:.c=.o)
 	$(CC) -o $@ $(LINE_SRC_TEST:.c=.o) $(LDFLAGS)
 
-VISUAL_SRC = visual_sim.c $(COMMON_SRC)
+VISUAL_SRC = visual_sim.c $(COMMON_SRC) ../../src/vision/line_detect.c
 
 visual_sim: $(VISUAL_SRC:.c=.o)
 	$(CC) -o $@ $(VISUAL_SRC:.c=.o) $(LDFLAGS) $(SDL_LDFLAGS)

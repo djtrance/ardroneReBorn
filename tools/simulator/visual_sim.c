@@ -13,6 +13,7 @@
 #include "rotation.h"
 #include "pattern.h"
 #include "obstacle.h"
+#include "line_detect.h"
 
 #define W 320
 #define H 240
@@ -430,6 +431,7 @@ typedef struct {
   bool stage2 : 1;
   bool stage3 : 1;
   bool stage4 : 1;
+  bool lines  : 1;
 } overlay_flags_t;
 
 int main(int argc, char **argv) {
@@ -439,6 +441,7 @@ int main(int argc, char **argv) {
   float approach_rate = 0.0f;
   bool show_pad = true;
   bool use_obstacle = false;
+  bool use_lines = false;
   scene_type_t scene = SCENE_RANDOM;
   int start_frame = 0;
 
@@ -451,6 +454,7 @@ int main(int argc, char **argv) {
       printf("  --descent <r>    Scale change/frame (+ = descent/expand, default 0)\n");
       printf("  --approach <r>   Scale change/frame for looming (alias for --descent)\n");
       printf("  --obstacle       Enable obstacle detection HUD\n");
+      printf("  --lines          Enable line/curve detection HUD\n");
       printf("  --scene <name>   Scene: random, wall, corridor, asymmetry (default random)\n");
       printf("  --no-pad         Disable landing pad overlay\n");
       printf("  --frame <n>      Start frame (default 0)\n");
@@ -462,6 +466,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[i], "--descent") && i+1 < argc) descent_rate = atof(argv[++i]);
     if (!strcmp(argv[i], "--approach") && i+1 < argc) approach_rate = atof(argv[++i]);
     if (!strcmp(argv[i], "--obstacle")) use_obstacle = true;
+    if (!strcmp(argv[i], "--lines")) use_lines = true;
     if (!strcmp(argv[i], "--scene") && i+1 < argc) scene = scene_from_name(argv[++i]);
     if (!strcmp(argv[i], "--no-pad")) show_pad = false;
     if (!strcmp(argv[i], "--frame") && i+1 < argc) start_frame = atoi(argv[++i]);
@@ -519,7 +524,7 @@ int main(int argc, char **argv) {
 
   canvas_t cv;
   vision_result_t result;
-  overlay_flags_t ov = {true, true, true, true};
+  overlay_flags_t ov = {true, true, true, true, false};
   bool playing = true;
   int frame_num = start_frame;
   uint32_t fps = 30;
@@ -569,6 +574,7 @@ int main(int argc, char **argv) {
           case SDLK_2: ov.stage2 = !ov.stage2; break;
           case SDLK_3: ov.stage3 = !ov.stage3; break;
           case SDLK_4: ov.stage4 = !ov.stage4; break;
+          case SDLK_5: ov.lines = !ov.lines; break;
           case SDLK_h: pattern_snapshot_home(pat, &frame); break;
           default: break;
         }
@@ -652,6 +658,17 @@ int main(int argc, char **argv) {
       obstacle_process(obs, &frame, &rot_prev, &obst_result);
     } else if (use_obstacle) {
       memset(&obst_result, 0, sizeof(obst_result));
+    }
+
+    /* === LINE DETECTION === */
+    line_result_t line_result;
+    line_config_t *line_cfg = NULL;
+    if (use_lines) {
+      line_cfg = line_default_config();
+      line_cfg->hough_threshold = 30;
+      line_cfg->hough_min_line_len = 20;
+      line_cfg->sobel_threshold = 25;
+      line_detect(&frame, line_cfg, &line_result);
     }
 
     /* === RENDER === */
@@ -812,18 +829,81 @@ int main(int argc, char **argv) {
       }
     }
 
+    /* Line detection overlay */
+    if (use_lines && ov.lines && frame_num > 0) {
+      /* Draw detected lines */
+      for (uint8_t i = 0; i < line_result.num_lines; i++) {
+        const detected_line_t *l = &line_result.lines[i];
+        /* Color by length: long=green, medium=yellow, short=red */
+        color_t col = l->length > 80 ? COLOR_GREEN :
+                      l->length > 40 ? COLOR_YELLOW : COLOR_RED;
+        canvas_draw_line(&cv, l->x1, l->y1, l->x2, l->y2, col);
+
+        /* Draw theta/rho label at midpoint */
+        int mx = (l->x1 + l->x2) / 2;
+        int my = (l->y1 + l->y2) / 2;
+        if (i < 5) { /* limit labels to avoid clutter */
+          char buf[48];
+          snprintf(buf, sizeof(buf), "%d", l->votes);
+          canvas_draw_string(&cv, mx + 2, my - 8, buf, col, COLOR_BLACK);
+        }
+      }
+
+      /* Draw detected circles */
+      for (uint8_t i = 0; i < line_result.num_circles; i++) {
+        const detected_circle_t *c = &line_result.circles[i];
+        canvas_draw_circle(&cv, (int)c->cx, (int)c->cy, (int)c->radius, COLOR_MAGENTA);
+        canvas_draw_circle(&cv, (int)c->cx, (int)c->cy, 2, COLOR_MAGENTA);
+      }
+
+      /* Lane info */
+      if (line_result.lane_valid) {
+        /* Draw lane center line */
+        canvas_draw_line(&cv, line_result.lane_center_x, 0,
+                          line_result.lane_center_x, H - 1, COLOR_CYAN);
+        char buf[80];
+        snprintf(buf, sizeof(buf), "LANE off=%+d head=%.1fdeg",
+                 line_result.lane_offset_x,
+                 line_result.lane_heading * 180.0f / 3.14159f);
+        canvas_draw_string(&cv, 4, H - 48, buf, COLOR_CYAN, COLOR_BLACK);
+      }
+
+      /* Line count + edge toggle info */
+      {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "LINES=%u CIRC=%u",
+                 line_result.num_lines, line_result.num_circles);
+        canvas_draw_string(&cv, W - 8*16, H - 36, buf, COLOR_WHITE, COLOR_BLACK);
+      }
+
+      /* Edge image overlay (toggle with 'e') */
+      if (line_result.edge_image) {
+        /* Draw edge pixels as dim green overlay */
+        for (int y = 0; y < H; y++) {
+          for (int x = 0; x < W; x++) {
+            if (line_result.edge_image->buf[y * W + x] > 0) {
+              canvas_put_pixel(&cv, x, y, (color_t){0, 80, 0, 80});
+            }
+          }
+        }
+        free(line_result.edge_image->buf);
+        free(line_result.edge_image);
+      }
+    }
+
     /* HUD */
     {
       char buf[256];
       snprintf(buf, sizeof(buf),
-               "Frame %d  Flow(%+d,%+d) qual=%u  alt=%.0fcm  %s%s%s%s",
+               "Frame %d  Flow(%+d,%+d) qual=%u  alt=%.0fcm  %s%s%s%s%s",
                frame_num,
                result.flow_x_fast / SUBP, result.flow_y_fast / SUBP,
                result.quality_fast, (double)alt_est,
                ov.stage1 ? "[1] " : "",
                ov.stage2 ? "[2] " : "",
                ov.stage3 ? "[3] " : "",
-               use_obstacle ? "[O] " : "");
+               use_obstacle ? "[O] " : "",
+               use_lines ? "[L] " : "");
       canvas_draw_string(&cv, 4, 4, buf, COLOR_WHITE, COLOR_BLACK);
 
       if (seq.use_yaw) {
@@ -852,7 +932,7 @@ int main(int argc, char **argv) {
     }
 
     canvas_draw_string(&cv, 4, H - 36,
-      "SPC:play R:reset 1-4:toggle <-/->:step h:home", COLOR_GRAY, COLOR_BLACK);
+      "SPC:play R:reset 1-5:toggle <-/->:step h:home", COLOR_GRAY, COLOR_BLACK);
 
     SDL_UpdateTexture(tex, NULL, cv.pixels, W * 4);
     SDL_RenderClear(ren);
