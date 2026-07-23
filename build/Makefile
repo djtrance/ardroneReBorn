@@ -14,12 +14,16 @@ NAV_SRCS := $(wildcard $(NAV_DIR)/*.c)
 NAV_OBJS := $(patsubst $(NAV_DIR)/%.c, $(OBJ_DIR)/navigation/%.o, $(NAV_SRCS))
 
 NET_DIR := $(SRC_DIR)/network
-NET_SRCS := $(wildcard $(NET_DIR)/*.c)
+NET_SRCS := $(filter-out $(NET_DIR)/skyproxy.c, $(wildcard $(NET_DIR)/*.c))
 NET_OBJS := $(patsubst $(NET_DIR)/%.c, $(OBJ_DIR)/network/%.o, $(NET_SRCS))
 
 DET_DIR := $(SRC_DIR)/detection
 DET_SRCS := $(wildcard $(DET_DIR)/*.c)
 DET_OBJS := $(patsubst $(DET_DIR)/%.c, $(OBJ_DIR)/detection/%.o, $(DET_SRCS))
+
+FLIGHT_DIR := $(SRC_DIR)/flight
+FLIGHT_SRCS := $(wildcard $(FLIGHT_DIR)/*.c)
+FLIGHT_OBJS := $(patsubst $(FLIGHT_DIR)/%.c, $(OBJ_DIR)/flight/%.o, $(FLIGHT_SRCS))
 
 TARGET := $(BIN_DIR)/drone_encoder
 
@@ -45,6 +49,9 @@ $(OBJ_DIR)/network:
 $(OBJ_DIR)/detection:
 	mkdir -p $(OBJ_DIR)/detection
 
+$(OBJ_DIR)/flight:
+	mkdir -p $(OBJ_DIR)/flight
+
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
@@ -63,9 +70,12 @@ $(OBJ_DIR)/network/%.o: $(NET_DIR)/%.c | $(OBJ_DIR)/network
 $(OBJ_DIR)/detection/%.o: $(DET_DIR)/%.c | $(OBJ_DIR)/detection
 	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(NAV_DIR) -I$(NET_DIR) -I$(DET_DIR) -I$(SRC_DIR) -c $< -o $@
 
-$(TARGET): $(OBJS) $(VISION_OBJS) $(NAV_OBJS) $(NET_OBJS) $(DET_OBJS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(OBJS) $(VISION_OBJS) $(NAV_OBJS) $(NET_OBJS) $(DET_OBJS) -o $@ $(LDFLAGS) \
-		-Wl,--unresolved-symbols=ignore-in-object-files
+$(OBJ_DIR)/flight/%.o: $(FLIGHT_DIR)/%.c | $(OBJ_DIR)/flight
+	$(CC) $(CFLAGS) -I$(VISION_DIR) -I$(NAV_DIR) -I$(NET_DIR) -I$(DET_DIR) -I$(FLIGHT_DIR) -I$(SRC_DIR) -c $< -o $@
+
+$(TARGET): $(OBJS) $(VISION_OBJS) $(NAV_OBJS) $(NET_OBJS) $(DET_OBJS) $(FLIGHT_OBJS) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(OBJS) $(VISION_OBJS) $(NAV_OBJS) $(NET_OBJS) $(DET_OBJS) $(FLIGHT_OBJS) -o $@ $(LDFLAGS) \
+		-Wl,--unresolved-symbols=ignore-in-object-files -lm
 	$(STRIP) $@
 	@echo "=== Build complete: $(TARGET) ==="
 	@file $(TARGET)
@@ -157,8 +167,25 @@ $(BIN_DIR)/skyproxy: $(NET_DIR)/skyproxy.c $(NET_DIR)/mdns.c $(NET_DIR)/recovery
 	$(SOFT_CC) $(SOFT_CFLAGS) -I$(NET_DIR) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS) -lpthread -lm
 	@echo "=== Built: $@ ==="
 
+# test_arsdk3_proto: ARNetworkAL + ARStream + ARSDK3 event protocol tests
+$(BIN_DIR)/test_arsdk3_proto: $(TEST_DIR)/test_arsdk3_proto.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(SRC_DIR) -I$(NET_DIR) $^ -o $@ $(SOFT_LDFLAGS)
+	@echo "=== Built: $@ ==="
+
+# test_handshake: JSON handshake parser tests
+$(BIN_DIR)/test_handshake: $(TEST_DIR)/test_handshake.c | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) $^ -o $@ $(SOFT_LDFLAGS)
+	@echo "=== Built: $@ ==="
+
+# test_flight: flight controller integration test
+TEST_FLIGHT_SRCS := $(TEST_DIR)/test_flight.c $(SRC_DIR)/connection.c \
+                    $(NAV_DIR)/gps.c $(FLIGHT_DIR)/flight_controller.c
+$(BIN_DIR)/test_flight: $(TEST_FLIGHT_SRCS) | $(BIN_DIR)
+	$(SOFT_CC) $(SOFT_CFLAGS) -I$(NAV_DIR) -I$(FLIGHT_DIR) -I$(SRC_DIR) $^ -o $@ $(SOFT_LDFLAGS) -lm
+	@echo "=== Built: $@ ==="
+
 # Build all test programs
-tests: $(BIN_DIR)/test_minimal $(BIN_DIR)/test_connection $(BIN_DIR)/test_camera $(BIN_DIR)/test_vision $(BIN_DIR)/test_stream $(BIN_DIR)/test_wifi_caps $(BIN_DIR)/test_uvc_camera $(BIN_DIR)/test_gps $(BIN_DIR)/test_modem $(BIN_DIR)/skyproxy
+tests: $(BIN_DIR)/test_minimal $(BIN_DIR)/test_connection $(BIN_DIR)/test_camera $(BIN_DIR)/test_vision $(BIN_DIR)/test_stream $(BIN_DIR)/test_wifi_caps $(BIN_DIR)/test_uvc_camera $(BIN_DIR)/test_gps $(BIN_DIR)/test_modem $(BIN_DIR)/skyproxy $(BIN_DIR)/test_arsdk3_proto $(BIN_DIR)/test_handshake $(BIN_DIR)/test_flight
 
 # Size stats
 size: $(TARGET)

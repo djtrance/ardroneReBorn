@@ -1,0 +1,8 @@
+# Patch 47: raspberry_pi_kernel510.patch - SKIPPED
+# This patch uses 'diff --git' format which is not compatible with standard patch command.
+# The paths in the patch (drivers/net/wireless/ath/ath6kl/*.c) are absolute kernel paths.
+# When applying from drivers/ directory with -p0, these paths don't match the actual file locations.
+# The ath6kl directory contains: main.c, cfg80211.c, usb.c, bmi.c, init.c, debug.c, wmi.c, htc.c, reg.c, ap.c, p2p.c, tgt.h, core.h
+# These files exist in drivers/ath6kl/, not drivers/net/wireless/ath/ath6kl/.
+# To fix: Either use -p3 with patch command, or rewrite the patch with relative paths (ath6kl/*.c).
+# For now, this patch is skipped and the copyright headers can be added manually if needed.
