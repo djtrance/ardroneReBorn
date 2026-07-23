@@ -1019,7 +1019,7 @@ static void *handshake_thread(void *arg) {
                         if (end && end > p) {
                             if (key_len == 8 && memcmp(key_start, "d2c_port", 8) == 0)
                                 d2c_port = (int)val;
-                            else if (key_len == 9 && memcmp(key_start, "d2c port", 9) == 0)
+                            else if (key_len == 8 && memcmp(key_start, "d2c port", 8) == 0)
                                 d2c_port = (int)val;
                         }
                         p = end;

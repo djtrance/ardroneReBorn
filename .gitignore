@@ -6,6 +6,7 @@ build/deploy/drone_encoder
 build/deploy/test_flight
 build/deploy/test_*
 build/deploy/include/
+build/deploy/firmware/
 *.o
 *.swp
 *.swo
@@ -14,6 +15,9 @@ build/sysroot/ti/
 tools/linux-kernel/_build/
 tools/linux-kernel/ath_netlink.c
 tools/linux-kernel/sysfs.c
+tools/simulator/sim_main
+tools/simulator/visual_sim
+tools/simulator/video_receiver
 drivers/**/*.o
 drivers/**/*.ko
 drivers/**/*.cmd
