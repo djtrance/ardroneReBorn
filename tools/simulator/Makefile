@@ -18,6 +18,7 @@ COMMON_SRC = \
 VO_SRC = ../../src/vision/visual_odometry.c ../../src/vision/image.c ../../src/vision/fast_detect.c ../../src/vision/lk_flow.c ../../src/vision/rotation.c
 LINE_SRC = ../../src/vision/line_detect.c ../../src/vision/image.c
 ADRC_SRC = ../../src/flight/adrc.c
+QUAD_SRC = quad_sim.c $(ADRC_SRC)
 
 SRC = sim_main.c $(COMMON_SRC)
 STAGE2_SRC = test_stage2.c $(COMMON_SRC)
@@ -26,6 +27,7 @@ OBSTACLE_SRC = test_obstacle.c $(COMMON_SRC)
 VO_SRC_TEST = test_visual_odometry.c $(VO_SRC)
 LINE_SRC_TEST = test_line_detect.c $(LINE_SRC)
 ADRC_SRC_TEST = test_adrc.c $(ADRC_SRC)
+QUAD_SRC_TEST = test_quad_adrc.c $(QUAD_SRC)
 
 sim_main: $(SRC:.c=.o)
 	$(CC) -o $@ $(SRC:.c=.o) $(LDFLAGS)
@@ -47,6 +49,14 @@ test_line_detect: $(LINE_SRC_TEST:.c=.o)
 
 test_adrc: $(ADRC_SRC_TEST:.c=.o)
 	$(CC) -o $@ $(ADRC_SRC_TEST:.c=.o) $(LDFLAGS)
+
+test_quad_adrc: $(QUAD_SRC_TEST:.c=.o)
+	$(CC) -o $@ $(QUAD_SRC_TEST:.c=.o) $(LDFLAGS)
+
+QUAD_VIS_SRC = quad_sim_visual.c quad_sim.c ../../src/flight/adrc.c
+
+quad_sim_visual: $(QUAD_VIS_SRC:.c=.o)
+	$(CC) -o $@ $(QUAD_VIS_SRC:.c=.o) $(LDFLAGS) $(SDL_LDFLAGS)
 
 VISUAL_SRC = visual_sim.c $(COMMON_SRC) ../../src/vision/line_detect.c
 
@@ -82,6 +92,10 @@ test_line_run: test_line_detect
 # ADRC controller tests
 test_adrc_run: test_adrc
 	./test_adrc
+
+# Quadcopter ADRC vs PID tests
+test_quad_run: test_quad_adrc
+	./test_quad_adrc
 
 # Generate synthetic test sequences
 generate_tests:
@@ -123,12 +137,22 @@ test_obstacle_run: test_obstacle
 	./test_obstacle
 
 # Run all tests
-check: test_synthetic test_hover test_stage2_run test_stage34_run test_obstacle_run test_vo_run test_line_run test_adrc_run visual_sim
+check: test_synthetic test_hover test_stage2_run test_stage34_run test_obstacle_run test_vo_run test_line_run test_adrc_run test_quad_run visual_sim
 	@echo "All tests passed"
 
+# Run quad sim visualizer
+run_quad: quad_sim_visual
+	./quad_sim_visual --adrc --alt 2.0
+
+run_quad_pid: quad_sim_visual
+	./quad_sim_visual --pid --alt 2.0
+
+run_quad_wind: quad_sim_visual
+	./quad_sim_visual --adrc --alt 2.0 --wind-x 2.0 --wind-y 1.0
+
 clean:
-	rm -f sim_main test_stage2 test_stage34 test_obstacle test_visual_odometry test_line_detect test_adrc visual_sim video_receiver \
-		sim_main.o test_stage2.o test_stage34.o test_obstacle.o test_visual_odometry.o test_line_detect.o test_adrc.o visual_sim.o video_receiver.o \
+	rm -f sim_main test_stage2 test_stage34 test_obstacle test_visual_odometry test_line_detect test_adrc test_quad_adrc visual_sim quad_sim_visual video_receiver \
+		sim_main.o test_stage2.o test_stage34.o test_obstacle.o test_visual_odometry.o test_line_detect.o test_adrc.o test_quad_adrc.o visual_sim.o quad_sim_visual.o video_receiver.o quad_sim.o \
 		../../src/vision/*.o ../../src/flight/*.o
 
-.PHONY: test_synthetic test_hover test_stage2_run test_stage34_run test_obstacle_run test_vo_run test_line_run test_adrc_run visual_sim run_visual run_rot check clean
+.PHONY: test_synthetic test_hover test_stage2_run test_stage34_run test_obstacle_run test_vo_run test_line_run test_adrc_run test_quad_run visual_sim run_visual run_rot check clean

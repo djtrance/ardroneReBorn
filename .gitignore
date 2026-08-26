@@ -18,6 +18,14 @@ tools/linux-kernel/sysfs.c
 tools/simulator/sim_main
 tools/simulator/visual_sim
 tools/simulator/video_receiver
+tools/simulator/test_stage2
+tools/simulator/test_stage34
+tools/simulator/test_obstacle
+tools/simulator/test_visual_odometry
+tools/simulator/test_line_detect
+tools/simulator/test_adrc
+tools/simulator/test_quad_adrc
+tools/simulator/quad_sim_visual
 drivers/**/*.o
 drivers/**/*.ko
 drivers/**/*.cmd
