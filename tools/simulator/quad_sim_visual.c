@@ -193,18 +193,6 @@ static void canvas_circle(canvas_t *c, int cx, int cy, int r, color_t col) {
     }
 }
 
-/* Simple 3D projection: isometric-like view */
-typedef struct { float x, y, z; } vec3f_t;
-
-static vec3f_t project(float x, float y, float z, float cam_dist) {
-    float scale = cam_dist / (cam_dist + z);
-    return (vec3f_t){ x * scale, y * scale, z };
-}
-
-static void draw_line3d(canvas_t *c, vec3f_t a, vec3f_t b, color_t col) {
-    canvas_line(c, (int)a.x, (int)a.y, (int)b.x, (int)b.y, col);
-}
-
 /* ================================================================== */
 /*  Flight controller mode                                             */
 /* ================================================================== */
@@ -218,7 +206,6 @@ typedef enum {
 int main(int argc, char **argv) {
     bool use_adrc = true;  /* ADRC vs PID toggle */
     float target_alt = 2.0f;
-    float cam_dist = 600.0f;
     float wind_x = 0.0f, wind_y = 0.0f;
     pilot_mode_t mode = MODE_HOVER;
 
@@ -314,8 +301,6 @@ int main(int argc, char **argv) {
                         memset(hist_motors, 0, sizeof(hist_motors));
                         hist_idx = 0;
                         break;
-                    case SDLK_EQUALS: case SDLK_PLUS: cam_dist += 50; break;
-                    case SDLK_MINUS: if (cam_dist > 200) cam_dist -= 50; break;
                     default: break;
                 }
             }
@@ -375,163 +360,223 @@ int main(int argc, char **argv) {
         /* === RENDER === */
         canvas_clear(&cv, 16, 20, 28);
 
-        /* Title */
-        color_t mode_col = use_adrc ? COLOR_CYAN : COLOR_ORANGE;
-        canvas_str(&cv, 4, 4, use_adrc ? "CONTROLLER: ADRC" : "CONTROLLER: PID", mode_col);
-        canvas_str(&cv, 4, 14, mode == MODE_HOVER ? "MODE: HOVER (auto)" : "MODE: PILOT (manual)", COLOR_GREEN);
+        /* Compute Euler angles */
+        float roll_rad = atan2f(2*(quad.quat.w*quad.quat.x+quad.quat.y*quad.quat.z),
+                                1-2*(quad.quat.x*quad.quat.x+quad.quat.y*quad.quat.y));
+        float pitch_rad = asinf(2*(quad.quat.w*quad.quat.y-quad.quat.z*quad.quat.x));
+        float yaw_rad = atan2f(2*(quad.quat.w*quad.quat.z+quad.quat.x*quad.quat.y),
+                               1-2*(quad.quat.y*quad.quat.y+quad.quat.z*quad.quat.z));
+        float roll_deg = roll_rad * 57.2958f;
+        float pitch_deg = pitch_rad * 57.2958f;
+        float yaw_deg = yaw_rad * 57.2958f;
 
-        /* === 3D Quadcopter View (right panel) === */
-        int qcx = WIN_W * 2 / 3, qcy = WIN_H / 2;
+        /* ============================================================ */
+        /*  LEFT HALF: Artificial Horizon (attitude indicator)           */
+        /* ============================================================ */
+        int ah_cx = WIN_W / 4, ah_cy = WIN_H / 2 - 10;
+        int ah_r = 120;
 
-        /* Draw ground grid */
-        for (int i = -3; i <= 3; i++) {
-            float gz = 0;
-            vec3f_t a = project(qcx + i*50, qcy + 80, gz, cam_dist);
-            vec3f_t b = project(qcx + i*50, qcy - 120, gz, cam_dist);
-            draw_line3d(&cv, a, b, COLOR_DKGRAY);
+        /* Clip circle */
+        canvas_circle(&cv, ah_cx, ah_cy, ah_r, COLOR_WHITE);
+        canvas_circle(&cv, ah_cx, ah_cy, ah_r + 1, COLOR_WHITE);
+
+        /* Sky/Ground split: pitch shifts the horizon line */
+        int horizon_y = ah_cy + (int)(pitch_deg * 1.5f);
+
+        for (int y = ah_cy - ah_r; y <= ah_cy + ah_r; y++) {
+            for (int x = ah_cx - ah_r; x <= ah_cx + ah_r; x++) {
+                int dx = x - ah_cx, dy = y - ah_cy;
+                if (dx*dx + dy*dy > ah_r*ah_r) continue;
+
+                /* Apply roll rotation to check if sky or ground */
+                float ry = (float)(y - ah_cy);
+                float rx = (float)(x - ah_cx);
+                float rot_y = rx * sinf(roll_rad) + ry * cosf(roll_rad);
+
+                if (rot_y < horizon_y - ah_cy) {
+                    /* Sky (blue) */
+                    canvas_put(&cv, x, y, (color_t){50, 100, 180, 255});
+                } else {
+                    /* Ground (brown) */
+                    canvas_put(&cv, x, y, (color_t){120, 80, 40, 255});
+                }
+            }
         }
-        for (int i = -3; i <= 3; i++) {
-            float gz = 0;
-            vec3f_t a = project(qcx - 150, qcy + 80 + i*40, gz, cam_dist);
-            vec3f_t b = project(qcx + 150, qcy + 80 + i*40, gz, cam_dist);
-            draw_line3d(&cv, a, b, COLOR_DKGRAY);
+
+        /* Horizon line (white, rolled) */
+        {
+            float cy_f = (float)(horizon_y - ah_cy);
+            float cos_r = cosf(roll_rad), sin_r = sinf(roll_rad);
+            float hx = sqrtf((float)(ah_r*ah_r) - cy_f*cy_f);
+            if (hx > 0) {
+                int x0 = ah_cx + (int)(-hx * cos_r - 0 * sin_r);
+                int y0 = ah_cy + (int)(-hx * sin_r + 0 * cos_r + cy_f);
+                int x1 = ah_cx + (int)( hx * cos_r - 0 * sin_r);
+                int y1 = ah_cy + (int)( hx * sin_r + 0 * cos_r + cy_f);
+                canvas_line(&cv, x0, y0, x1, y1, COLOR_WHITE);
+            }
         }
 
-        /* Altitude line */
-        float alt_px = -quad.pos.z * 60;  /* scale: 1m = 60px */
-        vec3f_t gnd = project(qcx, qcy + 80, 0, cam_dist);
-        vec3f_t hov = project(qcx, qcy + 80 - alt_px, 0, cam_dist);
-        draw_line3d(&cv, gnd, hov, COLOR_DKGRAY);
-        char alt_buf[32];
-        snprintf(alt_buf, sizeof(alt_buf), "%.1fm", -quad.pos.z);
-        canvas_str(&cv, (int)hov.x + 4, (int)hov.y - 4, alt_buf, COLOR_YELLOW);
+        /* Pitch ladder lines (every 10 deg) */
+        for (int p = -30; p <= 30; p += 10) {
+            if (p == 0) continue;
+            float p_y = (float)(p * 1.5f);
+            int half_w = 20;
+            int lx0 = ah_cx - half_w, lx1 = ah_cx + half_w;
+            /* Rotate by roll */
+            float ry0 = -half_w * sinf(roll_rad) + 0;
+            float ry1 = half_w * sinf(roll_rad) + 0;
+            int py0 = ah_cy + (int)(p_y + ry0);
+            int py1 = ah_cy + (int)(p_y + ry1);
+            canvas_line(&cv, lx0, py0, lx1, py1, COLOR_WHITE);
+        }
 
-        /* Draw quadcopter body */
-        float qx = qcx, qy = qcy + 80 - alt_px;
+        /* Fixed aircraft reference (center cross) */
+        canvas_line(&cv, ah_cx - 30, ah_cy, ah_cx - 10, ah_cy, COLOR_YELLOW);
+        canvas_line(&cv, ah_cx + 10, ah_cy, ah_cx + 30, ah_cy, COLOR_YELLOW);
+        canvas_line(&cv, ah_cx, ah_cy - 8, ah_cx, ah_cy - 2, COLOR_YELLOW);
+        canvas_line(&cv, ah_cx, ah_cy + 2, ah_cx, ah_cy + 8, COLOR_YELLOW);
 
-        /* Compute motor positions from quaternion */
-        float qw = quad.quat.w, qxx = quad.quat.x, qy2 = quad.quat.y, qz = quad.quat.z;
-        float arm_len = 60;
-        /* Motor offsets in body frame (+ config): M0=front, M1=right, M2=rear, M3=left */
-        float mx_body[4] = {0, arm_len, 0, -arm_len};
-        float my_body[4] = {-arm_len, 0, arm_len, 0};
+        /* Attitude text */
+        {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "ROLL %+6.1f", (double)roll_deg);
+            canvas_str(&cv, ah_cx - 32, ah_cy + ah_r + 8, buf, COLOR_CYAN);
+            snprintf(buf, sizeof(buf), "PITCH%+6.1f", (double)pitch_deg);
+            canvas_str(&cv, ah_cx - 32, ah_cy + ah_r + 18, buf, COLOR_CYAN);
+            snprintf(buf, sizeof(buf), "YAW  %+6.1f", (double)yaw_deg);
+            canvas_str(&cv, ah_cx - 32, ah_cy + ah_r + 28, buf, COLOR_YELLOW);
+        }
 
-        /* Rotate by quaternion */
+        /* ============================================================ */
+        /*  RIGHT HALF: 3D Quadcopter (isometric, tilted with attitude)  */
+        /* ============================================================ */
+        int qcx = WIN_W * 3 / 4, qcy = WIN_H / 2 - 10;
+
+        /* Camera: looking down at ~30 degrees, rotated by yaw */
+        float cam_pitch = -0.5f;  /* radians, looking slightly down */
+        float cx_ = cosf(yaw_rad), sy_ = sinf(yaw_rad);
+        float cp = cosf(cam_pitch), sp = sinf(cam_pitch);
+
+        /* Ground grid (3D → projected) */
+        for (int i = -4; i <= 4; i++) {
+            for (int j = -4; j <= 4; j++) {
+                float gx = i * 30.0f, gy = j * 30.0f, gz = 0;
+                /* Rotate by yaw */
+                float rx = gx * cx_ - gy * sy_;
+                float ry = gx * sy_ + gy * cx_;
+                /* Camera transform (pitch + scale) */
+                float depth = ry * sp + gz * cp;
+                float scale = 400.0f / (400.0f + depth);
+                int sx = qcx + (int)(rx * scale);
+                int sy = qcy + (int)((ry * cp - gz * sp) * scale);
+                canvas_put(&cv, sx, sy, COLOR_DKGRAY);
+            }
+        }
+
+        /* Altitude reference lines on ground */
+        float alt_m = -quad.pos.z;
+        float alt_px = alt_m * 40.0f;
+
+        /* Shadow on ground */
+        {
+            float depth = 0;
+            float scale = 400.0f / (400.0f + depth);
+            int sx = qcx + (int)(quad.pos.x * 40.0f * scale);
+            int sy = qcy + (int)(quad.pos.y * 40.0f * scale);
+            canvas_circle(&cv, sx, sy, 8, (color_t){40, 40, 40, 255});
+        }
+
+        /* Quad position in world (relative to origin) */
+        float wx = quad.pos.x * 40.0f;
+        float wy = quad.pos.y * 40.0f;
+        float wz = -alt_px;  /* NED: up is negative z */
+
+        /* Rotate world by camera yaw */
+        float wcx = wx * cx_ - wy * sy_;
+        float wcy = wx * sy_ + wy * cx_;
+        float wcz = wz;
+
+        /* Camera projection */
+        float depth_q = wcy * sp + wcz * cp;
+        float scale_q = 400.0f / (400.0f + depth_q);
+        int qx_px = qcx + (int)(wcx * scale_q);
+        int qy_px = qcy + (int)((wcy * cp - wcz * sp) * scale_q);
+
+        /* Draw altitude line from ground to quad */
+        {
+            float depth_g = 0;
+            float scale_g = 400.0f / (400.0f + depth_g);
+            int gnd_x = qcx + (int)(wcx * scale_g);
+            int gnd_y = qcy + (int)(wcy * scale_g);
+            canvas_line(&cv, gnd_x, gnd_y, qx_px, qy_px, COLOR_DKGRAY);
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.1fm", (double)alt_m);
+            canvas_str(&cv, gnd_x + 4, (gnd_y + qy_px) / 2, buf, COLOR_YELLOW);
+        }
+
+        /* Draw quad body (3D rotation by attitude) */
+        float arm_len = 50.0f * scale_q;
+        /* Motor positions in body frame: + config */
+        float bx[4] = {0, arm_len, 0, -arm_len};
+        float by[4] = {-arm_len, 0, arm_len, 0};
+
+        /* Apply attitude rotation (roll, pitch, yaw) to body vectors */
+        float cr = cosf(roll_rad), sr = sinf(roll_rad);
+        float cp2 = cosf(pitch_rad), sp2 = sinf(pitch_rad);
+
         for (int m = 0; m < 4; m++) {
-            float bx = mx_body[m], by = my_body[m];
-            /* Quaternion rotation: v' = q * v * q^-1 */
-            float rx = (1-2*(qy2*qy2+qz*qz))*bx + 2*(qxx*qy2-qz*qw)*by;
-            float ry = 2*(qxx*qy2+qz*qw)*bx + (1-2*(qxx*qxx+qz*qz))*by;
+            float lx = bx[m], ly = by[m], lz = 0;
 
-            vec3f_t p = project(qx + rx, qy + ry, 0, cam_dist);
-            vec3f_t center = project(qx, qy, 0, cam_dist);
+            /* Roll (around X) */
+            float ry1 = ly * cr - lz * sr;
+            float rz1 = ly * sr + lz * cr;
+            ly = ry1; lz = rz1;
 
-            /* Arm */
-            color_t arm_col = COLOR_GRAY;
-            draw_line3d(&cv, center, p, arm_col);
+            /* Pitch (around Y) */
+            float rx2 = lx * cp2 + lz * sp2;
+            float rz2 = -lx * sp2 + lz * cp2;
+            lx = rx2; lz = rz2;
 
-            /* Motor disc (size = throttle) */
-            int msize = 4 + (int)(quad.motor_rpm[m] * 10);
-            canvas_circle(&cv, (int)p.x, (int)p.y, msize, COLOR_WHITE);
+            /* Yaw (around Z) */
+            float rx3 = lx * cx_ - ly * sy_;
+            float ry3 = lx * sy_ + ly * cx_;
+            lx = rx3; ly = ry3;
+
+            int mx = qx_px + (int)lx;
+            int my = qy_px + (int)ly;
+
+            /* Arm from center to motor */
+            canvas_line(&cv, qx_px, qy_px, mx, my, COLOR_GRAY);
+
+            /* Motor disc (size proportional to throttle) */
+            int msize = 4 + (int)(quad.motor_rpm[m] * 12);
+            canvas_circle(&cv, mx, my, msize, COLOR_WHITE);
+
+            /* Thrust indicator (colored by RPM) */
+            color_t mcol = quad.motor_rpm[m] > 0.8f ? COLOR_RED :
+                           quad.motor_rpm[m] > 0.3f ? COLOR_GREEN : COLOR_GRAY;
+            canvas_circle(&cv, mx, my, msize - 1, mcol);
 
             /* Motor label */
             char mbuf[8];
             snprintf(mbuf, sizeof(mbuf), "M%d", m);
-            canvas_str(&cv, (int)p.x - 4, (int)p.y + msize + 2, mbuf, COLOR_GRAY);
+            canvas_str(&cv, mx - 4, my + msize + 2, mbuf, COLOR_GRAY);
         }
 
         /* Body center */
-        canvas_fill_rect(&cv, (int)qx - 6, (int)qy - 3, 12, 6, COLOR_WHITE);
+        canvas_fill_rect(&cv, qx_px - 4, qy_px - 4, 8, 8, COLOR_WHITE);
 
-        /* Heading indicator (nose direction) */
-        float nx = (1-2*(qy2*qy2+qz*qz))*0 + 2*(qxx*qy2-qz*qw)*(-20);
-        float ny = 2*(qxx*qy2+qz*qw)*0 + (1-2*(qxx*qxx+qz*qz))*(-20);
-        vec3f_t nose = project(qx + nx, qy + ny, 0, cam_dist);
-        vec3f_t ctr = project(qx, qy, 0, cam_dist);
-        draw_line3d(&cv, ctr, nose, COLOR_GREEN);
+        /* Heading arrow (nose direction) */
+        float nose_len = 30.0f * scale_q;
+        float nx = -sinf(yaw_rad) * nose_len;
+        float ny = -cosf(yaw_rad) * nose_len;
+        canvas_line(&cv, qx_px, qy_px, qx_px + (int)nx, qy_px + (int)ny, COLOR_GREEN);
 
-        /* === Left panel: Telemetry === */
-        int lx = 4, ly = 30;
-        canvas_str(&cv, lx, ly, "=== TELEMETRY ===", COLOR_WHITE); ly += 12;
-
-        char buf[128];
-        snprintf(buf, sizeof(buf), "Alt:  %6.2f m  (target: %.1f)", (double)(-quad.pos.z), (double)target_alt);
-        canvas_str(&cv, lx, ly, buf, COLOR_YELLOW); ly += 10;
-
-        float roll_deg = atan2f(2*(quad.quat.w*quad.quat.x+quad.quat.y*quad.quat.z),
-                                1-2*(quad.quat.x*quad.quat.x+quad.quat.y*quad.quat.y)) * 57.2958f;
-        float pitch_deg = asinf(2*(quad.quat.w*quad.quat.y-quad.quat.z*quad.quat.x)) * 57.2958f;
-        float yaw_deg = atan2f(2*(quad.quat.w*quad.quat.z+quad.quat.x*quad.quat.y),
-                               1-2*(quad.quat.y*quad.quat.y+quad.quat.z*quad.quat.z)) * 57.2958f;
-
-        snprintf(buf, sizeof(buf), "Roll: %6.1f deg", (double)roll_deg);
-        canvas_str(&cv, lx, ly, buf, COLOR_WHITE); ly += 10;
-        snprintf(buf, sizeof(buf), "Pitch:%6.1f deg", (double)pitch_deg);
-        canvas_str(&cv, lx, ly, buf, COLOR_WHITE); ly += 10;
-        snprintf(buf, sizeof(buf), "Yaw:  %6.1f deg", (double)yaw_deg);
-        canvas_str(&cv, lx, ly, buf, COLOR_WHITE); ly += 10;
-
-        snprintf(buf, sizeof(buf), "Gyro: %+6.1f %+6.1f %+6.1f deg/s",
-                 (double)(quad.omega.x*57.3), (double)(quad.omega.y*57.3), (double)(quad.omega.z*57.3));
-        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 10;
-
-        snprintf(buf, sizeof(buf), "Pos:  %+6.2f %+6.2f m (NED)",
-                 (double)quad.pos.x, (double)quad.pos.y);
-        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 10;
-
-        snprintf(buf, sizeof(buf), "Vel:  %+5.2f %+5.2f %+5.2f m/s",
-                 (double)quad.vel.x, (double)quad.vel.y, (double)quad.vel.z);
-        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 14;
-
-        /* Motor output */
-        canvas_str(&cv, lx, ly, "=== MOTORS ===", COLOR_WHITE); ly += 12;
-        for (int m = 0; m < 4; m++) {
-            int bar_w = 60;
-            int filled = (int)(quad.motor_rpm[m] * bar_w);
-            color_t mcol = quad.motor_rpm[m] > 0.8f ? COLOR_RED :
-                           quad.motor_rpm[m] > 0.3f ? COLOR_GREEN : COLOR_GRAY;
-            canvas_rect(&cv, lx, ly, bar_w, 6, COLOR_DKGRAY);
-            canvas_fill_rect(&cv, lx, ly, filled, 6, mcol);
-            char mbuf[16];
-            snprintf(mbuf, sizeof(mbuf), "M%d %.0f%%", m, quad.motor_rpm[m]*100);
-            canvas_str(&cv, lx + bar_w + 4, ly - 1, mbuf, mcol);
-            ly += 10;
-        }
-        ly += 4;
-
-        /* ESO states (ADRC only) */
-        if (use_adrc) {
-            canvas_str(&cv, lx, ly, "=== ESO (ADRC) ===", COLOR_CYAN); ly += 12;
-            float z1, z2, z3;
-            adrc_get_states(&adrc.roll_adrc, &z1, &z2, &z3);
-            snprintf(buf, sizeof(buf), "Roll  z1=%+7.1f z2=%+6.1f z3=%+6.1f", (double)z1, (double)z2, (double)z3);
-            canvas_str(&cv, lx, ly, buf, COLOR_CYAN); ly += 10;
-            adrc_get_states(&adrc.alt_adrc, &z1, &z2, &z3);
-            snprintf(buf, sizeof(buf), "Alt   z1=%+7.1f z2=%+6.1f z3=%+6.1f", (double)z1, (double)z2, (double)z3);
-            canvas_str(&cv, lx, ly, buf, COLOR_CYAN); ly += 10;
-        }
-
-        ly += 4;
-
-        /* Time */
-        snprintf(buf, sizeof(buf), "Time: %.2fs  Steps: %u", (double)quad.time_s, quad.step_count);
-        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 10;
-
-        /* Wind */
-        snprintf(buf, sizeof(buf), "Wind: %+5.1f %+5.1f m/s", (double)wind_x, (double)wind_y);
-        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 14;
-
-        /* Controls */
-        canvas_str(&cv, lx, ly, "=== CONTROLS ===", COLOR_WHITE); ly += 12;
-        snprintf(buf, sizeof(buf), "W/S:Pitch A/D:Roll Q/E:Yaw");
-        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 10;
-        snprintf(buf, sizeof(buf), "UP/DN:Throttle SPACE:Mode");
-        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 10;
-        snprintf(buf, sizeof(buf), "TAB:Switch +/-:Zoom R:Reset");
-        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 14;
-
-        /* === Bottom: Telemetry graphs === */
-        int gx = 4, gy = WIN_H - 90, gw = WIN_W - 8, gh = 80;
+        /* ============================================================ */
+        /*  BOTTOM: Telemetry graphs                                     */
+        /* ============================================================ */
+        int gx = 4, gy = WIN_H - 100, gw = WIN_W - 8, gh = 90;
         canvas_rect(&cv, gx, gy, gw, gh, COLOR_DKGRAY);
 
         /* Grid lines */
@@ -541,7 +586,7 @@ int main(int argc, char **argv) {
         }
 
         /* Altitude graph (green) */
-        canvas_str(&cv, gx + 2, gy + 2, "ALT", COLOR_GREEN);
+        canvas_str(&cv, gx + 2, gy + 2, "ALT(m)", COLOR_GREEN);
         for (int i = 1; i < HIST_LEN; i++) {
             int idx0 = (hist_idx - i - 1 + HIST_LEN) % HIST_LEN;
             int idx1 = (hist_idx - i + HIST_LEN) % HIST_LEN;
@@ -555,13 +600,12 @@ int main(int argc, char **argv) {
 
         /* Target altitude line */
         int tgt_y = gy + gh - (int)(target_alt / 6.0f * gh);
-        if (tgt_y >= gy && tgt_y <= gy+gh) {
+        if (tgt_y >= gy && tgt_y <= gy+gh)
             for (int x = gx; x < gx+gw; x += 4)
                 canvas_put(&cv, x, tgt_y, COLOR_YELLOW);
-        }
 
         /* Roll graph (cyan, scaled) */
-        canvas_str(&cv, gx + 40, gy + 2, "ROLL", COLOR_CYAN);
+        canvas_str(&cv, gx + 50, gy + 2, "ROLL(deg)", COLOR_CYAN);
         for (int i = 1; i < HIST_LEN; i++) {
             int idx0 = (hist_idx - i - 1 + HIST_LEN) % HIST_LEN;
             int idx1 = (hist_idx - i + HIST_LEN) % HIST_LEN;
@@ -572,6 +616,9 @@ int main(int argc, char **argv) {
             int x1 = x0 + (gw-2) / HIST_LEN;
             canvas_line(&cv, x0, y0, x1, y1, COLOR_CYAN);
         }
+
+        /* Zero line for roll */
+        canvas_line(&cv, gx, gy + gh/2, gx+gw, gy + gh/2, COLOR_DKGRAY);
 
         /* Motor traces (dimmer) */
         color_t mcols[4] = {{255,100,100,255}, {100,255,100,255}, {100,100,255,255}, {255,255,100,255}};
@@ -588,9 +635,65 @@ int main(int argc, char **argv) {
             }
         }
 
+        /* ============================================================ */
+        /*  RIGHT SIDE: Telemetry panel                                  */
+        /* ============================================================ */
+        int lx = WIN_W / 2 + 8, ly = 4;
+        color_t mode_col = use_adrc ? COLOR_CYAN : COLOR_ORANGE;
+        canvas_str(&cv, lx, ly, use_adrc ? "ADRC" : "PID", mode_col);
+        canvas_str(&cv, lx + 40, ly, mode == MODE_HOVER ? "HOVER" : "MANUAL", COLOR_GREEN);
+        ly += 12;
+
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Alt:  %5.1fm / %.1fm", (double)alt_m, (double)target_alt);
+        canvas_str(&cv, lx, ly, buf, COLOR_YELLOW); ly += 10;
+        snprintf(buf, sizeof(buf), "Gyro: %+6.1f %+6.1f %+6.1f",
+                 (double)(quad.omega.x*57.3), (double)(quad.omega.y*57.3), (double)(quad.omega.z*57.3));
+        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 10;
+        snprintf(buf, sizeof(buf), "Vel:  %+5.2f %+5.2f %+5.2f",
+                 (double)quad.vel.x, (double)quad.vel.y, (double)quad.vel.z);
+        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 12;
+
+        /* Motors */
+        canvas_str(&cv, lx, ly, "MOTORS", COLOR_WHITE); ly += 10;
+        for (int m = 0; m < 4; m++) {
+            int bar_w = 50;
+            int filled = (int)(quad.motor_rpm[m] * bar_w);
+            color_t mcol = quad.motor_rpm[m] > 0.8f ? COLOR_RED :
+                           quad.motor_rpm[m] > 0.3f ? COLOR_GREEN : COLOR_GRAY;
+            canvas_rect(&cv, lx, ly, bar_w, 5, COLOR_DKGRAY);
+            canvas_fill_rect(&cv, lx, ly, filled, 5, mcol);
+            char mbuf[16];
+            snprintf(mbuf, sizeof(mbuf), "M%d %.0f%%", m, quad.motor_rpm[m]*100);
+            canvas_str(&cv, lx + bar_w + 3, ly - 1, mbuf, mcol);
+            ly += 9;
+        }
+        ly += 4;
+
+        /* ESO states (ADRC only) */
+        if (use_adrc) {
+            canvas_str(&cv, lx, ly, "ESO", COLOR_CYAN); ly += 10;
+            float z1, z2, z3;
+            adrc_get_states(&adrc.roll_adrc, &z1, &z2, &z3);
+            snprintf(buf, sizeof(buf), "R:%+6.1f %+5.1f %+5.1f", (double)z1, (double)z2, (double)z3);
+            canvas_str(&cv, lx, ly, buf, COLOR_CYAN); ly += 9;
+            adrc_get_states(&adrc.alt_adrc, &z1, &z2, &z3);
+            snprintf(buf, sizeof(buf), "A:%+6.1f %+5.1f %+5.1f", (double)z1, (double)z2, (double)z3);
+            canvas_str(&cv, lx, ly, buf, COLOR_CYAN); ly += 12;
+        }
+
+        /* Time + wind */
+        snprintf(buf, sizeof(buf), "t=%.1fs  w=(%.1f,%.1f)", (double)quad.time_s, (double)wind_x, (double)wind_y);
+        canvas_str(&cv, lx, ly, buf, COLOR_GRAY); ly += 10;
+
+        /* Controls */
+        canvas_str(&cv, lx, ly, "W/S Pitch A/D Roll", COLOR_GRAY); ly += 9;
+        canvas_str(&cv, lx, ly + 9, "Q/E Yaw ^v Throttle", COLOR_GRAY); ly += 20;
+        canvas_str(&cv, lx, ly, "TAB ADRC/PID SPACE Mode", COLOR_GRAY); ly += 9;
+        canvas_str(&cv, lx, ly + 9, "+/- Zoom R Reset", COLOR_GRAY);
+
         /* Status bar */
-        canvas_str(&cv, 4, WIN_H - 12, "ESC:Quit SPACE:Mode TAB:ADRC/PID +/-:Zoom R:Reset",
-                   COLOR_GRAY);
+        canvas_str(&cv, 4, WIN_H - 12, "ESC:Quit", COLOR_GRAY);
 
         /* Update texture */
         SDL_UpdateTexture(tex, NULL, cv.pixels, WIN_W * 4);
