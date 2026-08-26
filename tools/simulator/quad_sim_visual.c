@@ -280,6 +280,8 @@ int main(int argc, char **argv) {
 
     quad_wind_t wind = { .velocity = {wind_x, wind_y, 0}, .turbulence = 0.05f };
 
+    uint32_t last_tick_ms = SDL_GetTicks();
+
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -300,6 +302,7 @@ int main(int argc, char **argv) {
                         memset(hist_roll, 0, sizeof(hist_roll));
                         memset(hist_motors, 0, sizeof(hist_motors));
                         hist_idx = 0;
+                        last_tick_ms = SDL_GetTicks();
                         break;
                     default: break;
                 }
@@ -322,33 +325,48 @@ int main(int argc, char **argv) {
         wind.velocity.x = wind_x;
         wind.velocity.y = wind_y;
 
-        /* === Physics + Control === */
+        /* === Physics + Control (run steps to match real time) === */
         if (!paused) {
-            float cmd_roll, cmd_pitch, cmd_yaw, cmd_thr;
+            uint32_t now_ms = SDL_GetTicks();
+            float sim_dt = (now_ms - last_tick_ms) / 1000.0f;
+            last_tick_ms = now_ms;
 
-            if (mode == MODE_HOVER) {
-                if (use_adrc) {
-                    quad_adrc_control(&adrc, &quad,
-                        inp_roll, inp_pitch, inp_yaw, target_alt,
-                        QUAD_SIM_DT, &cmd_roll, &cmd_pitch, &cmd_yaw, &cmd_thr);
+            /* Clamp: max 50ms per frame to avoid spiral of death */
+            if (sim_dt > 0.050f) sim_dt = 0.050f;
+            if (sim_dt < 0.001f) sim_dt = 0.001f;
+
+            /* Run physics steps to fill the real-time interval */
+            int num_steps = (int)(sim_dt / QUAD_SIM_DT);
+            if (num_steps < 1) num_steps = 1;
+            if (num_steps > 40) num_steps = 40;  /* cap at 40 steps */
+
+            for (int step = 0; step < num_steps; step++) {
+                float cmd_roll, cmd_pitch, cmd_yaw, cmd_thr;
+
+                if (mode == MODE_HOVER) {
+                    if (use_adrc) {
+                        quad_adrc_control(&adrc, &quad,
+                            inp_roll, inp_pitch, inp_yaw, target_alt,
+                            QUAD_SIM_DT, &cmd_roll, &cmd_pitch, &cmd_yaw, &cmd_thr);
+                    } else {
+                        quad_pid_control(&pid, &quad,
+                            inp_roll, inp_pitch, inp_yaw, target_alt,
+                            QUAD_SIM_DT, &cmd_roll, &cmd_pitch, &cmd_yaw, &cmd_thr);
+                    }
                 } else {
-                    quad_pid_control(&pid, &quad,
-                        inp_roll, inp_pitch, inp_yaw, target_alt,
-                        QUAD_SIM_DT, &cmd_roll, &cmd_pitch, &cmd_yaw, &cmd_thr);
+                    /* Manual mode: direct rate control */
+                    cmd_roll = inp_roll;
+                    cmd_pitch = inp_pitch;
+                    cmd_yaw = inp_yaw;
+                    cmd_thr = 0.23f + inp_thr;  /* hover + manual throttle */
+                    if (cmd_thr < 0) cmd_thr = 0;
+                    if (cmd_thr > 1) cmd_thr = 1;
                 }
-            } else {
-                /* Manual mode: direct rate control */
-                cmd_roll = inp_roll;
-                cmd_pitch = inp_pitch;
-                cmd_yaw = inp_yaw;
-                cmd_thr = 0.23f + inp_thr;  /* hover + manual throttle */
-                if (cmd_thr < 0) cmd_thr = 0;
-                if (cmd_thr > 1) cmd_thr = 1;
+
+                quad_step(&quad, cmd_roll, cmd_pitch, cmd_yaw, cmd_thr, &wind);
             }
 
-            quad_step(&quad, cmd_roll, cmd_pitch, cmd_yaw, cmd_thr, &wind);
-
-            /* Record history */
+            /* Record history (once per frame, not per step) */
             hist_alt[hist_idx] = -quad.pos.z;
             hist_roll[hist_idx] = atan2f(2*(quad.quat.w*quad.quat.x+quad.quat.y*quad.quat.z),
                                          1-2*(quad.quat.x*quad.quat.x+quad.quat.y*quad.quat.y));
@@ -701,8 +719,6 @@ int main(int argc, char **argv) {
         SDL_Rect dst = {0, 0, WIN_W, WIN_H};
         SDL_RenderCopy(ren, tex, NULL, &dst);
         SDL_RenderPresent(ren);
-
-        SDL_Delay(16);  /* ~60 FPS */
     }
 
     SDL_DestroyTexture(tex);
