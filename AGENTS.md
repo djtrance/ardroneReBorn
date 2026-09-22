@@ -91,6 +91,9 @@ parrotFramework/
 │   ├── wfb-integration.md     # wifibroadcast + UVC camera design
 │   ├── hardware-upgrades.md   # comprehensive hardware upgrade matrix
 │   └── auto-recovery-navigation.md  # motor-fail failsafe + nav + LD2450 radar
+├── esp32-airplane/             # ESP32 flying-wing project (reuses AR.Drone algos)
+│   ├── CHECKLIST.md               # ★ iterative definition checklist
+│   └── docs/algorithm-mapping.md  # AR.Drone → wing algorithm transfer matrix
 ├── src/                       # C source code
 │   ├── main.c                 # standalone drone_encoder binary
 │   ├── dsp_init_main.c        # standalone DSP init utility

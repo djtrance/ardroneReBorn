@@ -137,8 +137,12 @@ test_obstacle_run: test_obstacle
 	./test_obstacle
 
 # Run all tests
-check: test_synthetic test_hover test_stage2_run test_stage34_run test_obstacle_run test_vo_run test_line_run test_adrc_run test_quad_run visual_sim
+check: test_synthetic test_hover test_stage2_run test_stage34_run test_obstacle_run test_vo_run test_line_run test_adrc_run test_quad_run test_wing_run visual_sim
 	@echo "All tests passed"
+
+# ESP32 flying-wing host tests (esp32-airplane/ — see its firmware/Makefile)
+test_wing_run:
+	@$(MAKE) -C ../../esp32-airplane/firmware test
 
 # Run quad sim visualizer
 run_quad: quad_sim_visual
