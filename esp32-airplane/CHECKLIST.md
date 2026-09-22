@@ -24,7 +24,7 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 
 ---
 
-## Status snapshot — 2026-09-22 (first iteration)
+## Status snapshot — 2026-09-22 (iteration 2)
 
 **Implemented in firmware** (code exists, needs bench/SIL validation):
 
@@ -38,16 +38,22 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 | Geofence circle + altitude (G5) | ✅ implemented (independent layer) |
 | Failsafe FSM + preflight gate (H1/H6) | ✅ states + thresholds defined |
 | `config.h` parameter layer (E5) | ✅ all gains/limits centralized |
-| Host unit tests (J2 / E6) | ✅ **111 assertions passing** |
+| Host unit tests (J2 / E6) | ✅ **217 assertions passing** (111 core + 106 config/RC/sensor) |
 | LD2450 frame parser + track matcher (C7) | ✅ real parser — **verify offsets vs firmware** |
 | NMEA + Haversine port (C4) | ✅ ported + tested |
+| Pin map (B2) | ✅ written into `config.h` — **still needs bench verification** |
+| IMU board abstraction (C1/C2/C3) | ✅ `#if`-selected **GY-91 / GY-87** drivers + calibration |
+| RC input: SBUS + Spektrum decode (H2) | ✅ decoders + mapping — **needs receiver bench check** |
+| Persisted settings + CRC (B/E5) | ✅ NVS-backed blob, validate/clamp on load |
+| WiFi config portal (I5/I4-lite) | ✅ HTTP form + JSON API, saves to NVS |
+| Telemetry research (I1) | 📄 `docs/rc-and-telemetry.md` — options A–E ranked |
 
 **Still open / blocking**:
 - **§A airframe numbers** (A3 CG, A6 `V_stall`) — *physical blocker, needs the wing*
-- **§B.2 pin map** — all GPIO still `TODO` in `config.h`
-- Real sensor **drivers** (C1/C2/C3/C4/C6) are stubs
+- Real **GPS (C4) / LiDAR (C6) drivers** are stubs — must land before §C closes
 - **J1 wing SIL plant model** not started
-- RC input (H2), battery ADC (B4/H3) — hardcoded placeholders
+- Battery ADC (B4/H3) — hardcoded placeholder
+- **Spektrum byte-2 status layout** — two sources disagree, bench-validate against a real receiver
 
 ---
 
@@ -119,23 +125,27 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
   - [ ] Flash size (MB): ______
   - [ ] PSRAM present? [ ] yes [ ] no
   - [ ] ADC pins available & not used by PWM: [ ] mapped
-- [ ] **B2. Pin assignment (must be written down!)**
+- [x] **B2. Pin assignment (must be written down!)** — *draft in `config.h`, bench-verify*
 
   | Function | Bus | GPIO | Status |
   |----------|-----|------|--------|
-  | Left elevon servo | LEDC ch0 | ____ | [ ] |
-  | Right elevon servo | LEDC ch1 | ____ | [ ] |
-  | ESC throttle | LEDC ch2 | ____ | [ ] |
-  | IMU (ICM-20602 / MPU6050) | SPI / I2C | ____ | [ ] |
-  | Baro (BMP388) | I2C | ____ | [ ] |
-  | Magnetometer (QMC5883) | I2C | ____ | [ ] |
-  | GPS (u-blox) | UART1 RX/TX | ____ / ____ | [ ] |
-  | LiDAR (TFmini) **or** LD2450 | UART2 RX | ____ | [ ] |
-  | Battery voltage divider | ADC1 | ____ | [ ] |
+  | Left elevon servo | LEDC ch0 | **25** | [x] defined |
+  | Right elevon servo | LEDC ch1 | **26** | [x] defined |
+  | ESC throttle | LEDC ch2 | **27** | [x] defined |
+  | IMU + baro + mag (GY-91 / GY-87) | I2C | **21 / 22** (SDA/SCL) | [x] defined |
+  | IMU (SPI variant, reserved) | SPI | CS **5**, SCK 18, MISO 19, MOSI 23 | [ ] not used yet |
+  | GPS (u-blox) | UART1 | RX **13** / TX **14** | [x] defined |
+  | LiDAR (TFmini) | UART / soft-serial | RX **34** (input-only) | [x] defined |
+  | HLK-LD2450 radar | UART | RX **35** | [x] defined |
+  | Battery voltage divider | ADC1 | **32** | [x] defined (no ADC code yet) |
   | Current sensor (optional) | ADC1 | ____ | [ ] |
-  | Status LED | GPIO | ____ | [ ] |
-  | RC input (i-BUS / CRSF) | UART / GPIO | ____ | [ ] |
-  | Buzzer (optional) | GPIO | ____ | [ ] |
+  | Status LED | GPIO | **2** | [x] defined |
+  | RC input (SBUS / Spektrum) | UART2 | RX **16** / TX **17** | [x] defined |
+  | S.Port telemetry TX (reserved) | GPIO | **15** | [ ] phase 2 |
+  | Buzzer (optional) | GPIO | **4** | [ ] not wired |
+
+  > UART2 RX/TX are the **half-duplex** pair for FPort-style telemetry
+  > (join TX→RX through a 1N4148; see `docs/rc-and-telemetry.md` §3).
 
 - [ ] **B3. PWM configuration**
   - [ ] ESC: freq = ____ Hz, resolution = ____ bit, 1000–2000 µs endpoints verified [ ]
@@ -160,19 +170,21 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 
 ## C. Sensors (P0 / P1)
 
-- [ ] **C1. IMU** — model: ______
-  - [ ] Interface: [ ] SPI (preferred, ≥ 1 kHz) [ ] I2C
-  - [ ] Sample rate target: ____ Hz
-  - [ ] Full-scale range: gyro ____ dps, accel ____ g
-  - [ ] Driver written: [ ] (bypass Arduino lib or use as reference)
-  - [ ] Bias calibration routine (6-face accel + gyro-at-rest): [ ]
-  - [ ] Bias stored in NVS/flash & loaded at boot: [ ]
-- [ ] **C2. Barometer** — model: ______ (BMP388 preferred for resolution)
-  - [ ] I2C address conflict checked with mag: [ ]
-  - [ ] Sea-level reference captured at boot (relative altitude): [ ]
+- [ ] **C1. IMU** — model: **selected at compile time** → `IMU_GY91` (MPU9250, default) · `IMU_GY87` (MP6050)
+  - [x] Interface: [x] I2C (21/22) — SPI pins reserved in `config.h`, driver is I2C today
+  - [x] Sample rate target: **400 Hz** control loop (`DT_RATE_HZ`)
+  - [x] Full-scale range: gyro **2000 dps**, accel **16 g** (DLPF 184 Hz, PLL clock)
+  - [x] Driver written: `drivers/imu_gy91.cpp` / `drivers/imu_gy87.cpp` behind `imu_board.h` (`#if` guard, both files always compiled)
+  - [x] Bias calibration routine: gyro-at-rest (`imu_calibrate_rest`, 400 samples); **6-face accel still TODO**
+  - [ ] Bias stored in NVS/flash & loaded at boot: [ ] *settings blob exists, gyro bias not yet a field*
+- [ ] **C2. Barometer** — model: **BMP280** (`IMU_GY91`) / **BMP180** (`IMU_GY87`)
+  - [x] I2C address conflict checked with mag: [x] 0x76 / 0x77 vs mag 0x0C / 0x1E — no clash
+  - [ ] Sea-level reference captured at boot (relative altitude): [ ] `baro_set_sea_level_pa()` added, not called yet
   - [ ] Soft-mount + foam cover to dampen prop wash: [ ]
-  - [ ] Vertical velocity derived & filtered: [ ]
-- [ ] **C3. Magnetometer** — model: ______ (QMC5883 / HMC5883)
+  - [ ] Vertical velocity derived & filtered: [ ] *datasheet-compensated pressure only*
+  - [x] Datasheet compensation verified in unit tests (BMP180 69965 Pa, BMP280 25.08 °C)
+- [ ] **C3. Magnetometer** — model: **AK8963** (inside MPU9250, GY-91) / **HMC5883L** (GY-87)
+  - [x] Driver written: fuse-ROM ASA (GY-91) + gain table → µT, X/Z/Y wire order (GY-87)
   - [ ] Hard/soft-iron calibration (min/max ellipsoid): [ ]
   - [ ] Mounted away from ESC/battery current path: [ ] distance = ____ mm
   - [ ] Heading fusion weight vs gyro heading decided: [ ]
@@ -371,8 +383,11 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
   | LOG-DUMP | on ground | flush flash log | [ ] |
 
 - [ ] **H2. Link loss (RC)**
-  - [ ] Timeout: ____ ms → which failsafe: [ ]
+  - [x] Timeout: **800 ms** (`RC_LOSS_TIMEOUT_MS` in `config.h`, `rc.loss_timeout_ms` is a persisted setting)
+  - [x] Which failsafe: FSM → RTH when GPS valid, glide when not (`failsafe_update`)
+  - [x] Decoders: SBUS 25 B (headers `0F/1B/2B`, footer `00`, frameLost/failsafe bits) + Spektrum 16 B (1024/2048 modes)
   - [ ] Failsafe value injection tested with transmitter off in-flight sim: [ ]
+  - [ ] Spektrum byte-2 status layout verified against a real receiver: [ ]
 - [ ] **H3. Battery**
   - [ ] Voltage thresholds (per-cell): warn ____ V, RTH ____ V, critical ____ V
   - [ ] Current-based remaining (coulomb counting): [ ] optional
@@ -398,9 +413,11 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 ## I. Telemetry, logging & ground station (P1)
 
 - [ ] **I1. Protocol**
-  - [ ] [ ] MAVLink (recommended, GCS-ready) · [ ] custom lightweight · [ ] both
+  - [x] Feasibility study written → **`docs/rc-and-telemetry.md`** (options A–E, 15 DIY fields, ~83 responses/s)
+  - [ ] Decision: [ ] SBUS + S.Port · [x] **FPort (recommended if the RX is flashable)** · [ ] DSMX · [ ] FlySky · [ ] WiFi
   - [ ] Link: [ ] ELRS/900 MHz CRSF telemetry · [ ] WiFi (range < 50 m) · [ ] both
   - [ ] Baud / packet rate: ______
+  - [ ] Half-duplex TX wired (1N4148 on UART2) + S.Port poll loop coded: [ ]
 - [ ] **I2. Telemetry fields** (minimum set)
   - [ ] attitude, altitude, groundspeed, airspeed est, heading
   - [ ] GPS lat/lon/fix/HDOP, battery V/A, throttle %
@@ -416,7 +433,8 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
   - [ ] Live map + track + geofence display: [ ]
   - [ ] In-flight parameter change guarded (rate-limited, confirmed): [ ]
 - [ ] **I5. Alerting**
-  - [ ] Buzzer/LED patterns for: armed, fence, low batt, link loss, stall: [ ]
+  - [ ] Buzzer/LED patterns for: armed, fence, low batt, link loss, stall: [ ] *(LED blink pattern exists: solid = armed, 4 Hz = disarmed)*
+  - [x] WiFi configuration portal: `wifi_config.cpp` (STA→AP fallback, `wing-%04X` SSID), form + `GET /api/settings` + `POST /api/save` + `POST /api/factory`, all persisted to NVS
 
 > **Blockers for §I**: I1 protocol chosen, I3 logging working (a log from a
 > bench run exists), I4 one GCS displaying live data.
@@ -512,8 +530,15 @@ Collecting items we don't want to lose but aren't blocking yet:
 | 2026-09-22 | G2/G4/G5 | L1 chosen; wing RTH/loiter/glide/flare sequence written; circular geofence implemented |
 | 2026-09-22 | H1/H3/H6 | Failsafe FSM states + battery tiers + preflight gate implemented |
 | 2026-09-22 | C7 | HLK-LD2450 frame parser + nearest-neighbour track matcher implemented |
+| 2026-09-22 | B2 | Pin map written into `config.h` (LEDC 25/26/27, I2C 21/22, UART1 13/14, UART2 16/17, LiDAR 34, radar 35, ADC 32, LED 2) |
+| 2026-09-22 | C1/C2/C3 | Compile-time IMU board selection (`IMU_GY91` default / `IMU_GY87`, `#error` if both/neither) + GY-91 and GY-87 drivers + datasheet-compensated baro |
+| 2026-09-22 | H2 | SBUS + Spektrum decoders, channel map/deadband/expo, 800 ms loss timeout, arm polarity setting |
+| 2026-09-22 | E5/I5 | `Settings` blob (magic/version/size + CRC-16/CCITT + validate/clamp) persisted in NVS, edited over WiFi portal |
+| 2026-09-22 | I1 | Telemetry feasibility: `docs/rc-and-telemetry.md` — SBUS is one-way; A. SBUS+S.Port · B. **FPort** · C. DSMX · D. FlySky · E. WiFi |
+| 2026-09-22 | J2/E6 | **217 host unit tests passing** (111 core + 106 config/RC/sensor). Both IMU variants compile clean (`make test IMU=87` / `IMU=91`) |
 
 > **Next iteration target**: close **§A** (airframe numbers — needs the actual
-> wing) and **§B.2** (pin map) — they gate everything physical. In parallel,
-> start **J1** (6-DOF wing SIL) so F1/F2/F3 gains can be identified before any
-> hardware flies.
+> wing) and finish **§B** (B3 PWM bench verification), then **§C** with the two
+> missing drivers (C4 GPS, C6 LiDAR). In parallel, start **J1** (6-DOF wing
+> SIL) so F1/F2/F3 gains can be identified before any hardware flies, and
+> bench-validate the Spektrum frame status byte against a real receiver (H2).

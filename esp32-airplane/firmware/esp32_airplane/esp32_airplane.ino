@@ -21,6 +21,9 @@
 #include "guidance.h"
 #include "gps_nav.h"
 #include "failsafe.h"
+#include "settings.h"
+#include "rc_input.h"
+#include "wifi_config.h"
 #include "drivers/imu.h"
 #include "drivers/sensors.h"
 #include "drivers/ld2450.h"
@@ -31,6 +34,12 @@
 // ---------------------------------------------------------------------------
 // Shared state (single writer per field; guarded where crossed)
 // ---------------------------------------------------------------------------
+static Settings     g_set;            // persisted config (NVS-backed)
+static RcFrame      g_rc_frame;
+static RcInput      g_rc;
+static uint32_t     g_rc_last_rx_ms = 0;
+static bool         g_rc_ok = false;
+
 static Attitude     g_att;
 static GpsFix       g_fix;
 static ControlCmd   g_cmd;
@@ -81,14 +90,106 @@ static void pwm_output(const ElevonOut& o) {
 }
 
 // ---------------------------------------------------------------------------
+// RC input (checklist H2) — SBUS or Spektrum satellite, selected at runtime
+// through Settings.rc.proto and persisted across power-off.
+// ---------------------------------------------------------------------------
+static uint8_t s_rc_buf[64];
+static uint8_t s_rc_len = 0;
+
+static void rc_uart_init() {
+    rc_input_defaults(g_rc);
+    if (g_set.rc.proto == RC_PROTO_NONE) {
+        Serial.println(F("[rc] disabled (RC_PROTO_NONE)"));
+        return;
+    }
+    bool spek = (g_set.rc.proto == RC_PROTO_SPEKTRUM);
+    uint32_t baud = spek ? SPEKTRUM_BAUD : SBUS_BAUD;
+
+    // SBUS: 100000 8E2 with an inverted line. Spektrum: 115200 8N1.
+    if (spek) {
+        Serial2.begin(baud, SERIAL_8N1, PIN_RC_RX, PIN_RC_TX, false);
+    } else {
+        Serial2.begin(baud, SERIAL_8E2, PIN_RC_RX, PIN_RC_TX,
+                      g_set.rc.sbus_inverted != 0);
+    }
+
+    // Resynchronise: drain until the line has been idle for 2 ms. Spektrum
+    // frames are 16 bytes back-to-back with a ~7 ms gap, so a 2 ms quiet
+    // window always lands between frames — without this the first byte we
+    // ever see could be mid-frame and every channel would stay misaligned.
+    uint32_t t0 = millis();
+    while (millis() - t0 < 500) {
+        while (Serial2.available() > 0) Serial2.read();
+        delay(2);
+        if (Serial2.available() == 0) break;
+    }
+    s_rc_len = 0;
+    Serial.printf("[rc] %s on UART2 rx=%d tx=%d baud=%lu inverted=%d\n",
+                  spek ? "Spektrum" : "SBUS", PIN_RC_RX, PIN_RC_TX,
+                  (unsigned long)baud, g_set.rc.sbus_inverted);
+}
+
+static void rc_service(uint32_t now_ms) {
+    if (g_set.rc.proto == RC_PROTO_NONE) {
+        g_rc_ok = false;
+        return;
+    }
+    const bool     spek = (g_set.rc.proto == RC_PROTO_SPEKTRUM);
+    const uint8_t  flen = spek ? (uint8_t)SPEKTRUM_FRAME_LEN
+                               : (uint8_t)SBUS_FRAME_LEN;
+
+    int avail = Serial2.available();
+    if (avail > 0) {
+        int want = avail;
+        if (want > (int)(sizeof(s_rc_buf) - s_rc_len))
+            want = (int)sizeof(s_rc_buf) - s_rc_len;
+        int got = Serial2.readBytes((char*)s_rc_buf + s_rc_len, want);
+        if (got > 0) s_rc_len = (uint8_t)(s_rc_len + got);
+
+        while (s_rc_len >= flen) {
+            bool ok = spek ? spektrum_decode(s_rc_buf, g_rc_frame)
+                           : sbus_decode(s_rc_buf, g_rc_frame);
+            if (ok) {
+                rc_map(g_rc_frame, g_set.rc, now_ms, g_rc);
+                g_rc_last_rx_ms = now_ms;
+                g_rc_ok = !g_rc.failsafe && !g_rc.frame_lost;
+            } else {
+                // SBUS footer/header mismatch => we started mid-frame.
+                // Drop one byte and hunt for the real header.
+                memmove(s_rc_buf, s_rc_buf + 1, s_rc_len - 1);
+                s_rc_len--;
+                continue;
+            }
+            memmove(s_rc_buf, s_rc_buf + flen, s_rc_len - flen);
+            s_rc_len = (uint8_t)(s_rc_len - flen);
+        }
+    }
+
+    // Loss timeout: a stopped stream must become "not ok" even though no new
+    // (bad) frame ever arrives to say so.
+    if ((int32_t)(now_ms - g_rc_last_rx_ms) > (int32_t)g_set.rc.loss_timeout_ms)
+        g_rc_ok = false;
+}
+
+// Re-apply cached, non-Settings state after the portal saves. Called by
+// wifi_config so a trim/servo change lands on the next control tick.
+static void on_settings_changed(Settings& s) {
+    mixing_load(&s.mix);
+    // RC protocol or UART settings changed -> reopen the port.
+    rc_uart_init();
+}
+
+// ---------------------------------------------------------------------------
 // Telemetry (checklist I1/I2) — CSV line on USB serial for now.
-// TODO: replace with MAVLink when I1 is decided.
+// TODO: replace with MAVLink when I1 is decided; S.Port fields go through
+//       docs/rc-and-telemetry.md once the RX side is validated.
 // ---------------------------------------------------------------------------
 static void telemetry_print(uint32_t now) {
     Serial.printf("%lu,phase=%s,armed=%d,roll=%.2f,pitch=%.2f,yaw=%.2f,"
                   "v=%.1f,phi_cmd=%.2f,thr=%.2f,b0r=%.1f,f=%.2f,"
                   "env[stall=%d bank=%d vne=%d g=%d],"
-                  "fs=%s,gps=%d,hdop=%.1f,sv=%d,trk=%.0f,dHome=%.0f,"
+                  "fs=%s,rc=%d,rcage=%lu,rssi=%d,board=\"%s\","
+                  "gps=%d,hdop=%.1f,sv=%d,trk=%.0f,dHome=%.0f,"
                   "overruns=%lu\r\n",
                   (unsigned long)now,
                   phase_name(guidance_phase()), g_armed ? 1 : 0,
@@ -99,6 +200,10 @@ static void telemetry_print(uint32_t now) {
                   g_dbg.env_stall ? 1 : 0, g_dbg.env_bank ? 1 : 0,
                   g_dbg.env_vne ? 1 : 0, g_dbg.env_g ? 1 : 0,
                   fs_event_name(g_fs.last_event),
+                  g_rc_ok ? 1 : 0,
+                  (unsigned long)(now - g_rc_last_rx_ms),
+                  g_rc_frame.link_quality,
+                  sensors_board_name(),
                   g_fix.valid ? 1 : 0, g_fix.hdop, g_fix.num_sv,
                   g_fix.course_deg, g_nav.dist_home_m,
                   (unsigned long)g_loop_overruns);
@@ -110,13 +215,20 @@ static void telemetry_print(uint32_t now) {
 void setup() {
     Serial.begin(115200);
     delay(200);
-    Serial.println(F("\n== esp32_airplane : flying wing (phase 1: stabilize + RTH) =="));
+    Serial.printf("\n== esp32_airplane : flying wing (phase 1: stabilize + RTH) ==\n");
+    Serial.printf("board IMU: %s\n", IMU_BOARD_NAME);
 
     pinMode(PIN_STATUS_LED, OUTPUT);
     digitalWrite(PIN_STATUS_LED, LOW);
 
+    // Persisted configuration first: pins, RC protocol and mix all depend on
+    // it. NVS miss => defaults (settings_load fills them in).
+    if (!settings_load(g_set)) Serial.println(F("[cfg] no saved settings, using defaults"));
+    mixing_load(&g_set.mix);
+
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     pwm_init();
+    rc_uart_init();
 
     ahrs_init();
     control_init();
@@ -131,10 +243,17 @@ void setup() {
     ok &= gps_init();
     ok &= lidar_init();
 
-    Serial.printf("init: imu=%d baro=%d mag=%d gps=%d lidar=%d\n",
+    Serial.printf("init: imu=%d baro=%d mag=%d gps=%d lidar=%d rc=%s\n",
                   imu_healthy(), baro_healthy(), mag_healthy(),
-                  gps_healthy(), lidar_healthy());
+                  gps_healthy(), lidar_healthy(),
+                  g_set.rc.proto == RC_PROTO_NONE ? "off" : "on");
     if (!ok) Serial.println(F("!! sensor init incomplete — preflight will block arming"));
+
+    // Configuration portal (I5). Runs for the whole session; changes are
+    // written to NVS immediately so they survive a power cycle.
+    wifi_config_begin(g_set, on_settings_changed);
+    Serial.printf("[wifi] portal: SSID '%s' port %u\n",
+                  wifi_config_ssid(), g_set.wifi.http_port);
 
     // Arming gate (H6): we will not arm until AHRS converges + preflight passes.
     Serial.println(F("waiting for AHRS convergence..."));
@@ -149,12 +268,17 @@ void loop() {
     static uint32_t t_telem    = 0;
     static uint32_t t_nav      = 0;
     static uint32_t t_imu      = 0;
-    static float    rc_age_ms  = 0;
     static float    gps_age_s  = 0;
     static bool     stall_latch = false;
 
     uint32_t now_us = micros();
     uint32_t elapsed_us = now_us - t_prev;
+    uint32_t now_ms = millis();
+
+    // ---- RC ingest ---------------------------------------------------------
+    // SBUS frames arrive every ~9 ms, Spektrum every ~9 ms; the 400 Hz control
+    // slot drains them well within one period without blocking.
+    if (elapsed_us >= (1000000UL / DT_RATE_HZ)) rc_service(now_ms);
 
     // ---- 400 Hz control slot ---------------------------------------------
     if (elapsed_us >= (1000000UL / DT_RATE_HZ)) {
@@ -168,10 +292,11 @@ void loop() {
         // Pilot/nav command selection: nav phase decides who drives.
         Phase ph = guidance_phase();
         g_cmd.nav_active = (ph != Phase::ARMED_MANUAL && ph != Phase::DISARMED);
-        // TODO: read RC here (H2). Until then, neutral sticks => level flight.
-        g_cmd.pitch = 0.0f;
-        g_cmd.roll  = 0.0f;
-        g_cmd.throttle = 0.35f;                  // fixed mid throttle for bench
+        // Phase 1 flies on RC only (H2): the sticks are the outer-loop
+        // setpoints whenever guidance is not in charge.
+        g_cmd.pitch    = g_rc.pitch;
+        g_cmd.roll     = g_rc.roll;
+        g_cmd.throttle = g_rc.throttle;
         g_cmd.phi_cmd   = g_nav.phi_cmd;
         g_cmd.v_cmd     = g_nav.v_cmd;
         g_cmd.h_cmd     = g_nav.h_cmd;
@@ -186,12 +311,14 @@ void loop() {
 
         // ---- failsafe evaluation (H1) at control rate ---------------------
         bool fence = g_nav.fence_breach;
+        float rc_age = g_rc_ok ? 0.0f : (float)(now_ms - g_rc_last_rx_ms);
         g_fs = failsafe_update(FsEvent::NONE,
-                               /*rc_ok=*/true, rc_age_ms,
+                               /*rc_ok=*/g_rc_ok || g_set.rc.proto == RC_PROTO_NONE,
+                               rc_age,
                                g_fix.valid, gps_age_s,
                                VBAT_WARN_CELL + 0.15f,   // TODO real ADC (B4/H3)
                                imu_healthy(), g_dbg.env_stall,
-                               fence, millis());
+                               fence, now_ms);
         if (g_fs.rth_requested && ph == Phase::ARMED_MANUAL) guidance_trigger_rth();
         if (g_fs.glide_requested && ph == Phase::ARMED_MANUAL) {
             // transition handled by guidance_update on next nav tick
@@ -242,13 +369,22 @@ void loop() {
         g_pf = preflight_check(imu_healthy(), ahrs_converged(), mag_healthy(),
                                g_fix, baro_healthy(),
                                VBAT_WARN_CELL + 0.15f,
-                               true, !g_nav.fence_breach);
-        // Preflight gate arms the vehicle (H1/H6). TODO: also require a
-        // physical pilot arm switch before this becomes autonomous.
+                               g_rc_ok || g_set.rc.proto == RC_PROTO_NONE,
+                               !g_nav.fence_breach);
+        // Arming gate (H1/H6): preflight must pass AND the physical arm
+        // switch must be asserted. With RC_PROTO_NONE (bench, no receiver) the
+        // switch requirement is dropped so the stack can be exercised.
+        bool arm_ok = (g_set.rc.proto == RC_PROTO_NONE) ? true : g_rc.arm;
         bool was_armed = g_armed;
-        g_armed = g_pf.all_ok;
+        g_armed = g_pf.all_ok && arm_ok;
         if (g_armed && !was_armed) guidance_arm();
         if (!g_armed && was_armed) { guidance_disarm(); failsafe_init(); }
+
+        // RTH switch / mode switch (H2) — pilot can always grab RTH back.
+        if (g_armed && ph == Phase::ARMED_MANUAL &&
+            (g_rc.rth || g_rc.mode == 1)) {
+            guidance_trigger_rth();
+        }
 
         // Radar (C7) — parse any pending bytes.
         // TODO: read UART2 bytes into Ld2450Stream::feed().
@@ -257,8 +393,11 @@ void loop() {
     // ---- telemetry slot ----------------------------------------------------
     if (now_us - t_telem >= (1000000UL / 10)) {   // 10 Hz
         t_telem = now_us;
-        telemetry_print(millis());
+        telemetry_print(now_ms);
         digitalWrite(PIN_STATUS_LED, g_armed ? HIGH :
                      (millis() / 250) & 1);        // blink = not armed
     }
+
+    // ---- configuration portal (I5) ----------------------------------------
+    wifi_config_loop();
 }

@@ -15,6 +15,52 @@
 #define CFG_USE_AIRSPEED_GPS    1       // airspeed from GPS+wind (C5, start here)
 #define CFG_CONTROLLER_ADRC     1       // 1 = ADRC (F1), 0 = PID cascade
 
+// ===========================================================================
+// IMU board — compile-time selection  (checklist C1/C2/C3)
+//
+// Exactly one board must be selected. All three sensor drivers behind a board
+// (accel+gyro, baro, mag) are selected together, because they ship on the same
+// module and share the I2C bus:
+//
+//   IMU_GY91   GY-91   : MPU9250 (accel+gyro+magnetometer) + BMP280
+//   IMU_GY87   GY-87   : MPU6050 (accel+gyro) + HMC5883L + BMP180
+//
+// Override without editing this file:
+//   * Arduino IDE  -> put  -DIMU_GY87  in  build_opt.h next to the sketch
+//   * PlatformIO   -> build_flags = -DIMU_GY87
+//   * make test    -> CXXFLAGS += -DIMU_GY87   (host unit tests)
+//
+// The two board drivers are both compiled but only one is active: the Arduino
+// IDE builds every .cpp in the sketch folder, so selection MUST be by #if.
+// ===========================================================================
+#if !defined(IMU_GY91) && !defined(IMU_GY87)
+  #define IMU_GY91                        // default board
+#endif
+#if defined(IMU_GY91) && defined(IMU_GY87)
+  #error "Select exactly ONE IMU board: -DIMU_GY91 or -DIMU_GY87"
+#endif
+
+#if defined(IMU_GY91)
+  #define IMU_BOARD_NAME      "GY-91 (MPU9250+BMP280)"
+  #define IMU_BOARD_ID        91
+  #define BARO_I2C_ADDR       0x76        // BMP280 (SDO -> GND)
+  #define MAG_I2C_ADDR        0x0C        // AK8963, internal to MPU9250
+  #define IMU_USE_I2C         1           // both sensors sit on Wire
+  #define MAG_FULL_SCALE_UT   4912.0f      // AK8963 16-bit range
+#elif defined(IMU_GY87)
+  #define IMU_BOARD_NAME      "GY-87 (MPU6050+HMC5883L+BMP180)"
+  #define IMU_BOARD_ID        87
+  #define BARO_I2C_ADDR       0x77        // BMP180
+  #define MAG_I2C_ADDR        0x1E        // HMC5883L
+  #define IMU_USE_I2C         1
+  #define MAG_FULL_SCALE_UT   4912.0f      // HMC5883L +/-8 Ga -> 800 uT typ
+#else
+  #error "No IMU board selected"
+#endif
+
+// IMU I2C address (both MPU6050 and MPU9250 default to 0x68 with AD0 low)
+#define IMU_I2C_ADDR            0x68
+
 // ---------------------------------------------------------------------------
 // Pin map — checklist B2  (VALIDATE ON BENCH WITH PROPS REMOVED)
 // ---------------------------------------------------------------------------
@@ -31,15 +77,27 @@
 #define PIN_IMU_MISO            19
 #define PIN_IMU_MOSI            23
 
-#define PIN_GPS_RX              16      // UART2 (or UART1) — GPS TX -> ESP RX
-#define PIN_GPS_TX              17
+#define PIN_GPS_RX              13      // UART1 — GPS TX -> ESP RX
+#define PIN_GPS_TX              14      // UART1 — ESP TX -> GPS RX (NMEA config)
 #define PIN_LIDAR_RX            34      // UART / soft-serial RX (input only pin)
 #define PIN_RADAR_RX            35      // HLK-LD2450 RX
 
 #define PIN_VBAT_ADC            32      // ADC1 battery divider (B4)
 #define PIN_STATUS_LED          2
 #define PIN_BUZZER              4       // optional (I5)
-#define PIN_RC_INPUT            15      // i-BUS / CRSF (H2)
+
+// --- RC input (H2) — SBUS or Spektrum satellite -----------------------------
+// Phase 1 flies on RC only, so this UART must stay free of conflicts.
+// UART2 is used for RC (not GPS) because SBUS is an inverted input.
+#define PIN_RC_RX               16      // UART2 RX  <- receiver SBUS/Spektrum
+#define PIN_RC_TX               17      // UART2 TX  -> S.Port telemetry (phase 2)
+#define PIN_RC_INPUT            PIN_RC_RX   // back-compat alias
+
+// --- Telemetry to the RC radio (docs/rc-and-telemetry.md) -------------------
+// FrSky SmartPort: 57600, inverted, half-duplex on a single wire.
+// Tie TX and RX together through a 1N4148 pointing at the FC (doc §3.1).
+// Phase 2 — the pin is reserved so the harness never has to be re-shuffled.
+#define PIN_SPORT_TX            15      // reserved: S.Port half-duplex TX (I1)
 
 // ---------------------------------------------------------------------------
 // PWM (ESC + servos) — checklist B3
@@ -135,8 +193,7 @@
 #define IMU_SAMPLE_HZ           500
 #define IMU_GYRO_FS_DPS         2000
 #define IMU_ACCEL_FS_G          16
-#define BARO_I2C_ADDR           0x76     // BMP388 — check vs mag (C2)
-#define MAG_I2C_ADDR            0x0D     // QMC5883
+// BARO_I2C_ADDR and MAG_I2C_ADDR come from the IMU board block above (C2/C3).
 #define GPS_BAUD                9600     // NMEA (C4)
 #define GPS_MIN_FIX_S           10       // seconds of stable 3D fix
 #define GPS_MAX_HDOP            2.0f     // trust threshold

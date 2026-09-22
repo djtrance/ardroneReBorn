@@ -1,29 +1,25 @@
 #include "sensors.h"
+#include "imu_board.h"
 #include "../config.h"
 #include <math.h>
 
 // ===========================================================================
-// All drivers in this file are STUBS so the firmware compiles and the control
-// + guidance stack can be exercised with synthetic data. Replace each TODO
-// before marking the corresponding checklist section (§C) done.
+// Barometer + magnetometer are board-selected (config.h); GPS and LiDAR are
+// still stubs — see the TODO on each before closing checklist section C.
 // ===========================================================================
 
 // --- Barometer -------------------------------------------------------------
-static bool s_baro_ok = false;
+static bool  s_baro_ok = false;
 static float s_sea_level_pa = 101325.0f;
 
 bool baro_init() {
-    // TODO: Wire.begin(); BMP388 chip-id check at BARO_I2C_ADDR; soft IIR.
-    s_baro_ok = true;
+    s_baro_ok = board_baro_init();
     return s_baro_ok;
 }
 
 bool baro_read(float& pressure_pa, float& temp_c) {
     if (!s_baro_ok) return false;
-    // TODO: real read.
-    pressure_pa = s_sea_level_pa;   // stub: sea level => 0 m relative
-    temp_c = 25.0f;
-    return true;
+    return board_baro_read(pressure_pa, temp_c);
 }
 
 float baro_altitude_m(float pressure_pa, float sea_level_pa) {
@@ -34,20 +30,22 @@ float baro_altitude_m(float pressure_pa, float sea_level_pa) {
 
 bool baro_healthy() { return s_baro_ok; }
 
+void baro_set_sea_level_pa(float pa) {
+    if (pa > 80000.0f && pa < 110000.0f) s_sea_level_pa = pa;
+}
+float baro_sea_level_pa() { return s_sea_level_pa; }
+
 // --- Magnetometer ----------------------------------------------------------
 static bool s_mag_ok = false;
 
 bool mag_init() {
-    // TODO: QMC5883 init at MAG_I2C_ADDR; load soft/hard-iron cal (C3).
-    s_mag_ok = CFG_USE_MAG;
+    s_mag_ok = board_mag_init();
     return s_mag_ok;
 }
 
 bool mag_read(Vec3& field_ut) {
     if (!s_mag_ok) return false;
-    // TODO: real read. Stub: horizontal field pointing north.
-    field_ut = {22.0f, 0.0f, -40.0f};
-    return true;
+    return board_mag_read(field_ut);
 }
 
 bool mag_healthy() { return s_mag_ok; }
@@ -91,3 +89,6 @@ bool lidar_poll(LidarSample& s) {
 }
 
 bool lidar_healthy() { return s_lidar_ok; }
+
+// --- Board identification (telemetry field TF_IMU_MODEL) -------------------
+const char* sensors_board_name() { return board_sensor_name(); }

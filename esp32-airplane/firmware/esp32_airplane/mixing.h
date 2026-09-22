@@ -1,11 +1,12 @@
 // mixing.h — elevon mixing + adverse-yaw differential  (checklist D1/D2/D3)
 #pragma once
 #include <stdint.h>
+#include "settings.h"
 
 // Normalised commands in [-1, +1]:
 //   pitch_cmd > 0  => nose up
 //   roll_cmd  > 0  => roll right
-// Output: microseconds for each surface, already trimmed and clamped.
+// Output: microseconds for each surface, already trimmed, reversed and clamped.
 struct ElevonOut {
     uint16_t left_us;
     uint16_t right_us;
@@ -15,6 +16,12 @@ struct ElevonOut {
 // mix_elevons(): the function that replaces the quad's 4-motor mixer.
 // Sign convention MUST be validated on the bench with props removed (D1).
 ElevonOut mix_elevons(float pitch_cmd, float roll_cmd, float throttle_cmd);
+
+// Feed runtime trim/span/reverse/differential from the WiFi portal (I5).
+// Pass nullptr to fall back to the config.h compile-time defaults — that is
+// what the unit tests use, so they stay independent of persisted state.
+void mixing_load(const MixSettings* m);
+const MixSettings& mixing_settings();
 
 // Utility: clamp helper used across modules.
 float clampf(float v, float lo, float hi);
