@@ -38,7 +38,7 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 | Geofence circle + altitude (G5) | ✅ implemented (independent layer) |
 | Failsafe FSM + preflight gate (H1/H6) | ✅ states + thresholds defined |
 | `config.h` parameter layer (E5) | ✅ all gains/limits centralized |
-| Host unit tests (J2 / E6) | ✅ **251 assertions passing** (111 core + 140 config/RC/sensor) |
+| Host unit tests (J2 / E6) | ✅ **252 assertions passing** (111 core + 141 config/RC/sensor) |
 | LD2450 frame parser + track matcher (C7) | ✅ real parser — **verify offsets vs firmware** |
 | GPS driver: u-blox 6 UART1 + NMEA/UBX (C4) | ✅ real driver — GGA/RMC @ 4 Hz, byte-stream parser + UBX config, tested |
 | Pin map (B2) | ✅ written into `config.h` — **still needs bench verification** |
@@ -190,8 +190,14 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
   - [ ] Heading fusion weight vs gyro heading decided: [ ]
 - [ ] **C4. GPS** — model: **u-blox 6 (NEO-6M)**
   - [x] Protocol: NMEA @ **9600 baud** (factory, never re-bauded), sentences
-        enabled: **GGA + RMC @ 4 Hz** (`GPS_RATE_MS` 250 ms); GLL/GSA/GSV/VTG
-        silenced via UBX-CFG-MSG so 9600 keeps ~40% line headroom
+        enabled: **GGA + RMC @ 5 Hz** (`GPS_RATE_MS` 200 ms = NEO-6 datasheet
+        **maximum**); GLL/GSA/GSV/VTG silenced via UBX-CFG-MSG so 9600 keeps
+        25% line headroom (725 vs 960 B/s)
+  - [ ] **10 Hz target**: ❌ not possible on u-blox 6 — datasheet GPS.G6-HW-
+        09005 caps NEO-6G/Q/M/T at **5 Hz**, and u-blox support warns faster
+        rates cause packet loss + abend/reset. Needs a **NEO-M8N** (10 Hz
+        concurrent GNSS, 18 Hz single) *and* a CFG-PRT jump to 115200
+        (GGA+RMC @10 Hz ≈ 1450 B/s > 960 B/s at 9600)
   - [ ] Fix quality required before arming: [ ] `gps_trustworthy()` = quality≥1
         + ≥6 SV + HDOP≤2.0, **not yet** gated on the `GPS_MIN_FIX_S`=10 s timer
   - [x] HDOP threshold to trust position: [x] **2.0** (`GPS_MAX_HDOP`)
@@ -543,6 +549,7 @@ Collecting items we don't want to lose but aren't blocking yet:
 | 2026-09-22 | I1 | Telemetry feasibility: `docs/rc-and-telemetry.md` — SBUS is one-way; A. SBUS+S.Port · B. **FPort** · C. DSMX · D. FlySky · E. WiFi |
 | 2026-09-22 | J2/E6 | **217 host unit tests passing** (111 core + 106 config/RC/sensor). Both IMU variants compile clean (`make test IMU=87` / `IMU=91`) |
 | 2026-09-22 | C4 | **Real GPS driver landed** — u-blox 6 (NEO-6M) on UART1 @ 9600: byte-stream assembler (checksum gate, `$` resync, truncation/overflow recovery), UBX-CFG-MSG keep GGA+RMC / drop GLL+GSA+GSV+VTG, UBX-CFG-RATE 4 Hz, `gps_healthy()` = line actually seen. Fixed parser bug: `strtok` collapsed empty fields → no-fix GGA left a **stale `valid`** (would delay GPS_LOSS); RMC status `V` now clears it too. **251 host unit tests passing** (111 + 140), both IMU variants |
+| 2026-09-22 | C4 | Rate bumped 4 → **5 Hz** (`GPS_RATE_MS` 200 ms) = the **NEO-6 datasheet maximum** (GPS.G6-HW-09005 "Maximum Navigation update rate: 5 Hz"; u-blox support: faster ⇒ packet loss + abend/reset). **10 Hz rejected as out-of-spec for this hardware** — needs NEO-M8N (10 Hz) + CFG-PRT→115200. Bandwidth at 5 Hz: 725/960 B/s @9600. **252 tests** (111 + 141) |
 
 > **Next iteration target**: close **§A** (airframe numbers — needs the actual
 > wing) and finish **§B** (B3 PWM bench verification), then **§C** with the one

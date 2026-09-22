@@ -40,7 +40,7 @@ esp32-airplane/
 │   ├── algorithm-mapping.md      # AR.Drone → wing algorithm transfer matrix
 │   └── rc-and-telemetry.md       # RC in (SBUS/Spektrum) + telemetry out (TX16S)
 └── firmware/
-    ├── Makefile                  # `make test` → 251 host unit tests
+    ├── Makefile                  # `make test` → 252 host unit tests
     │                             # `make test IMU=87` → GY-87 board instead
     ├── tests/
     │   ├── test_wing_core.cpp    # J2: mixing, envelope, L1, RTH, NMEA, LD2450, AHRS, failsafe (111)
@@ -87,9 +87,9 @@ in the sketch folder); only one is active, and defining both or neither is a
 ### Run the tests
 
 ```bash
-cd esp32-airplane/firmware && make test      # 251 assertions
+cd esp32-airplane/firmware && make test      # 252 assertions
 # or from the repo-wide suite:
-cd tools/simulator && make check             # quad (90) + wing (251)
+cd tools/simulator && make check             # quad (90) + wing (252)
 ```
 
 ---

@@ -202,12 +202,21 @@
 // gps_init() re-configures at every boot (no blind baud change, stays at the
 // factory 9600) by sending UBX-CFG-MSG + UBX-CFG-RATE:
 //   keep GGA + RMC (all the parser reads), silence GLL/GSA/GSV/VTG,
-//   measRate = GPS_RATE_MS  ->  4 Hz nav epochs.
-// Bandwidth: ~144 B/cycle * 4 Hz = ~576 B/s vs ~960 B/s line rate at 9600,
-// so the UART has headroom (spec warns the module drops output when its
-// TX buffer overflows).
+//   measRate = GPS_RATE_MS.
+//
+// RATE IS 5 Hz BECAUSE THE HARDWARE IS: the NEO-6 datasheet (GPS.G6-HW-
+// 09005) states "Maximum Navigation update rate NEO-6G/Q/M/T: 5 Hz", and
+// u-blox support adds that running faster causes "packet loss, and
+// abend/reset (exception) type behaviour" — resets mid-flight are not an
+// acceptable trade for a nav sensor. 10 Hz therefore needs a u-blox 8+
+// module (and a CFG-PRT jump to 115200: GGA+RMC at 10 Hz is ~1450 B/s vs
+// the ~960 B/s line rate at 9600).
+//
+// Bandwidth at 5 Hz with only GGA+RMC: ~145 B/cycle * 5 = ~725 B/s vs
+// ~960 B/s at 9600 (75% line utilisation, spec warns the module drops
+// output when its TX buffer overflows — this keeps headroom).
 #define GPS_BAUD                9600     // factory default, never re-bauded
-#define GPS_RATE_MS             250      // 4 Hz nav epochs (spec floor: 200 ms)
+#define GPS_RATE_MS             200      // 5 Hz = NEO-6 datasheet maximum
 #define GPS_MIN_FIX_S           10       // seconds of stable 3D fix
 #define GPS_MAX_HDOP            2.0f     // trust threshold
 #define GPS_LINE_MAX            128      // NMEA max 82 B; 128 absorbs bursts

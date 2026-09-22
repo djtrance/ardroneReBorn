@@ -548,14 +548,14 @@ static void test_gps_ublox6() {
     ck(n == 14 && memcmp(pkt, want_rate200, 14) == 0,
        "CFG-RATE 200 ms matches u-blox worked example");
 
-    static const uint8_t want_rate250[14] = {
-        0xB5,0x62,0x06,0x08,0x06,0x00,0xFA,0x00,0x01,0x00,0x01,0x00,0x10,0x96 };
+    ck(GPS_RATE_MS == 200,
+       "configured rate == NEO-6 datasheet maximum (5 Hz / 200 ms)");
     n = ubx_build_cfg_rate(pkt, sizeof(pkt), GPS_RATE_MS);
-    ck(n == 14 && memcmp(pkt, want_rate250, 14) == 0,
-       "CFG-RATE 4 Hz (250 ms) payload + checksum");
+    ck(n == 14 && memcmp(pkt, want_rate200, 14) == 0,
+       "configured rate builds the spec vector");
     ck(ubx_build_cfg_rate(pkt, sizeof(pkt), 100) == 0,
-       "CFG-RATE rejects faster than the NEO-6M 5 Hz limit");
-    ck(ubx_build_cfg_rate(pkt, 13, 250) == 0, "CFG-RATE rejects short buffer");
+       "CFG-RATE rejects 10 Hz — out of spec for NEO-6 (packet loss/resets)");
+    ck(ubx_build_cfg_rate(pkt, 13, 200) == 0, "CFG-RATE rejects short buffer");
 
     // --- UBX-CFG-MSG: GSV off, RMC on, UART1 only -------------------------
     static const uint8_t want_gsv[16] = {
