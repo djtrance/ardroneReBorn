@@ -6,13 +6,16 @@
 //   rc_input     SBUS + Spektrum frame decode, channel map, expo, arm switch
 //   sensor_math  MPU/HMC/AK8963 scaling + BMP180/BMP280 datasheet vectors
 //   mixing       runtime trim / span / reverse driven by Settings
+//   gps          u-blox 6 NMEA byte stream + UBX CFG-RATE/CFG-MSG packets
 //
-// Checklist ref: B2, D1/D2/D3, C1/C2/C3, H2, I5, J2.
+// Checklist ref: B2, D1/D2/D3, C1/C2/C3, C4, H2, I5, J2.
 #include "settings.h"
 #include "rc_input.h"
 #include "mixing.h"
 #include "config.h"
+#include "gps_nav.h"
 #include "drivers/sensor_math.h"
+#include "drivers/sensors.h"
 
 #include <cstdio>
 #include <cstring>
@@ -440,7 +443,142 @@ static void test_sensor_math() {
 }
 
 // ===========================================================================
-// 6. Mixing driven by runtime settings
+// 6. GPS — u-blox 6 NMEA byte stream + UBX config packets  (checklist C4)
+// ===========================================================================
+// Classic NMEA worked examples, checksums recomputed: GGA *47, RMC *6A.
+static const char* k_gga =
+    "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n";
+static const char* k_gga_nofix =
+    "$GPGGA,123519,,,,,0,00,,,M,,M,,*6B\r\n";
+static const char* k_rmc =
+    "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A\n";
+
+static void test_gps_ublox6() {
+    printf("[gps ublox6]\n");
+
+    GpsFix f;
+    memset(&f, 0, sizeof(f));
+    gps_init();                                  // host path: flag + reset
+    ck(!gps_healthy(), "unhealthy before any line arrives");
+
+    // --- byte-by-byte GGA, split arbitrarily by the UART ------------------
+    bool upd = false;
+    for (const char* p = k_gga; *p; ++p)          // '\r' closes it, '\n' is
+        upd = upd || gps_feed_byte(*p, f);        // then an empty line
+    ck(upd, "GGA parsed when fed one byte at a time");
+    ck(f.valid && f.fix_quality == 1, "GGA quality 1 => valid fix");
+    ck(near(f.lat, 48.1173, 1e-6) && near(f.lon, 11.5166667, 1e-6),
+       "GGA lat/lon converted to decimal degrees");
+    ck(near(f.alt_m, 545.4, 0.01), "GGA altitude metres");
+    ck(f.num_sv == 8 && near(f.hdop, 0.9, 1e-4) && f.utc == 123519,
+       "GGA sats / hdop / utc");
+    ck(gps_lines_seen() == 1, "CRLF counts as exactly one line");
+    ck(gps_healthy(), "healthy after first checksum-valid line");
+    ck(gps_trustworthy(f), "healthy GGA fix passes the arm/RTH gate");
+
+    // --- RMC in two chunks (as the UART would deliver them) ---------------
+    gps_feed(k_rmc, 17, f);
+    ck(f.ground_mps == 0.0f && gps_lines_seen() == 1,
+       "half a sentence updates nothing");
+    gps_feed(k_rmc + 17, strlen(k_rmc) - 17, f);
+    ck(near(f.ground_mps, 11.5235, 1e-3), "RMC 22.4 kt -> 11.52 m/s");
+    ck(near(f.course_deg, 84.4, 1e-3), "RMC course-over-ground");
+    ck(gps_lines_seen() == 2, "second sentence counted");
+
+    // --- gate rejects degraded fixes --------------------------------------
+    GpsFix g = f; g.hdop = 3.0f;
+    ck(!gps_trustworthy(g), "hdop above GPS_MAX_HDOP rejected");
+    g = f; g.num_sv = 4;
+    ck(!gps_trustworthy(g), "fewer than 6 satellites rejected");
+
+    // --- no-fix GGA: EMPTY fields must clear the stale valid flag ---------
+    // (strtok would collapse the empties and shift the fields — this is the
+    //  case the GPS_LOSS failsafe depends on).
+    GpsFix nf;
+    memset(&nf, 0, sizeof(nf));
+    gps_feed(k_gga, strlen(k_gga), nf);          // get a fix first
+    ck(nf.valid, "fix established before signal loss");
+    gps_feed(k_gga_nofix, strlen(k_gga_nofix), nf);
+    ck(!nf.valid && nf.fix_quality == 0 && nf.num_sv == 0,
+       "no-fix GGA clears valid (no stale position for failsafe)");
+    ck(!gps_trustworthy(nf), "no-fix GGA fails the gate");
+
+    // --- resynchronisation -------------------------------------------------
+    GpsFix r;
+    memset(&r, 0, sizeof(r));
+    gps_line_reset();
+    const char* noise = "\xFF\xFE" "PGGA,garbage,,,\r\n";   // no leading '$'
+    gps_feed(noise, strlen(noise), r);
+    ck(gps_lines_seen() == 0 && !r.valid, "line noise without '$' never counts");
+
+    memset(&r, 0, sizeof(r));
+    gps_feed(k_gga, strlen(k_gga), r);
+    ck(r.valid && gps_lines_seen() == 1, "clean sentence after noise");
+
+    gps_line_reset();
+    memset(&r, 0, sizeof(r));
+    const char* trunc = "$GPGGA,123519,4807.038,N,011";
+    gps_feed(trunc, strlen(trunc), r);                  // truncated frame
+    ck(!r.valid && gps_lines_seen() == 0, "truncated frame yields nothing");
+    gps_feed(k_gga, strlen(k_gga), r);
+    ck(r.valid && gps_lines_seen() == 1, "'$' resync drops the truncated frame");
+
+    gps_line_reset();
+    memset(&r, 0, sizeof(r));
+    const char* bad =
+        "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*00\r\n";
+    gps_feed(bad, strlen(bad), r);
+    ck(gps_lines_seen() == 0 && !r.valid, "wrong checksum rejected");
+    gps_feed(k_gga, strlen(k_gga), r);
+    ck(r.valid && gps_lines_seen() == 1, "good sentence right after a bad one");
+
+    gps_line_reset();
+    memset(&r, 0, sizeof(r));
+    for (int i = 0; i < 400; ++i) gps_feed_byte('x', r);   // buffer overflow
+    gps_feed_byte('\n', r);
+    ck(gps_lines_seen() == 0, "overlong garbage line dropped");
+    gps_feed(k_gga, strlen(k_gga), r);
+    ck(r.valid && gps_lines_seen() == 1, "recovers after buffer overflow");
+
+    // --- UBX-CFG-RATE (spec worked example, 200 ms => ... DE 6A) ----------
+    uint8_t pkt[20];
+    static const uint8_t want_rate200[14] = {
+        0xB5,0x62,0x06,0x08,0x06,0x00,0xC8,0x00,0x01,0x00,0x01,0x00,0xDE,0x6A };
+    int n = ubx_build_cfg_rate(pkt, sizeof(pkt), 200);
+    ck(n == 14 && memcmp(pkt, want_rate200, 14) == 0,
+       "CFG-RATE 200 ms matches u-blox worked example");
+
+    static const uint8_t want_rate250[14] = {
+        0xB5,0x62,0x06,0x08,0x06,0x00,0xFA,0x00,0x01,0x00,0x01,0x00,0x10,0x96 };
+    n = ubx_build_cfg_rate(pkt, sizeof(pkt), GPS_RATE_MS);
+    ck(n == 14 && memcmp(pkt, want_rate250, 14) == 0,
+       "CFG-RATE 4 Hz (250 ms) payload + checksum");
+    ck(ubx_build_cfg_rate(pkt, sizeof(pkt), 100) == 0,
+       "CFG-RATE rejects faster than the NEO-6M 5 Hz limit");
+    ck(ubx_build_cfg_rate(pkt, 13, 250) == 0, "CFG-RATE rejects short buffer");
+
+    // --- UBX-CFG-MSG: GSV off, RMC on, UART1 only -------------------------
+    static const uint8_t want_gsv[16] = {
+        0xB5,0x62,0x06,0x01,0x08,0x00,0xF0,0x03,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x38 };
+    n = ubx_build_cfg_msg_nmea(pkt, sizeof(pkt), 0x03, 0);
+    ck(n == 16 && memcmp(pkt, want_gsv, 16) == 0,
+       "CFG-MSG disables GSV (all ports zero)");
+
+    static const uint8_t want_rmc[16] = {
+        0xB5,0x62,0x06,0x01,0x08,0x00,0xF0,0x04,
+        0x00,0x01,0x00,0x00,0x00,0x00,0x04,0x44 };
+    n = ubx_build_cfg_msg_nmea(pkt, sizeof(pkt), 0x04, 1);
+    ck(n == 16 && memcmp(pkt, want_rmc, 16) == 0,
+       "CFG-MSG enables RMC on UART1 only");
+    ck(ubx_build_cfg_msg_nmea(pkt, sizeof(pkt), 0x04, 3) == 0,
+       "CFG-MSG rejects an out-of-range rate");
+    ck(ubx_build_cfg_msg_nmea(pkt, 15, 0x04, 1) == 0,
+       "CFG-MSG rejects short buffer");
+}
+
+// ===========================================================================
+// 7. Mixing driven by runtime settings
 // ===========================================================================
 static void test_mixing_settings() {
     printf("[mixing settings]\n");
@@ -511,6 +649,7 @@ int main() {
     test_spektrum_decode();
     test_rc_mapping();
     test_sensor_math();
+    test_gps_ublox6();
     test_mixing_settings();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

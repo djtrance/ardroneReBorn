@@ -2,10 +2,14 @@
 #include "imu_board.h"
 #include "../config.h"
 #include <math.h>
+#ifdef ARDUINO
+  #include <Arduino.h>          // Serial1, delay — GPS UART (C4)
+#endif
 
 // ===========================================================================
-// Barometer + magnetometer are board-selected (config.h); GPS and LiDAR are
-// still stubs — see the TODO on each before closing checklist section C.
+// Barometer + magnetometer are board-selected (config.h); GPS (u-blox 6) is
+// implemented below, LiDAR is still a stub — see the TODO on it before
+// closing checklist section C.
 // ===========================================================================
 
 // --- Barometer -------------------------------------------------------------
@@ -50,26 +54,71 @@ bool mag_read(Vec3& field_ut) {
 
 bool mag_healthy() { return s_mag_ok; }
 
-// --- GPS -------------------------------------------------------------------
+// --- GPS — u-blox 6 (NEO-6M) on UART1, checklist C4 -----------------------
+// Factory default is 9600 8N1 with GGA+GLL+GSA+GSV+RMC+VTG+TXT at 1 Hz
+// (u-blox 6 spec App. A.5/A.11). We keep the factory baud (never re-baud —
+// a failed baud change would leave the module mute with no ACK to notice)
+// and instead slim the output to GGA+RMC at GPS_RATE_MS (4 Hz), which fits
+// the 9600-baud line with ~40% headroom.
+//
+// Everything is re-sent on every boot, so a factory-fresh or wiped module
+// needs no manual u-center setup. No ACK is read: UBX-CFG-* is idempotent,
+// and the parser only ever accepts checksum-valid NMEA, so a half-applied
+// config degrades to "fewer sentences", never to garbage fixes.
 static bool s_gps_ok = false;
 
+// NMEA sentence ids we toggle (u-blox class 0xF0). We parse GGA (position)
+// and RMC (speed/course) only — GGA also carries hdop/num_sv, so GSA/GSV
+// are pure bandwidth here.
+enum { NMEA_GGA = 0x00, NMEA_GLL = 0x01, NMEA_GSA = 0x02,
+       NMEA_GSV = 0x03, NMEA_RMC = 0x04, NMEA_VTG = 0x05 };
+
 bool gps_init() {
-    // TODO: Serial1.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+    gps_line_reset();
     s_gps_ok = true;
+#ifdef ARDUINO
+    Serial1.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+    delay(100);                                  // module finishes booting
+    uint8_t pkt[16];
+    static const uint8_t k_keep[] = { NMEA_GGA, NMEA_RMC };
+    static const uint8_t k_drop[] = { NMEA_GLL, NMEA_GSA, NMEA_GSV, NMEA_VTG };
+    for (unsigned i = 0; i < sizeof(k_keep); ++i) {
+        int n = ubx_build_cfg_msg_nmea(pkt, sizeof(pkt), k_keep[i], 1);
+        if (n > 0) Serial1.write(pkt, n);
+    }
+    for (unsigned i = 0; i < sizeof(k_drop); ++i) {
+        int n = ubx_build_cfg_msg_nmea(pkt, sizeof(pkt), k_drop[i], 0);
+        if (n > 0) Serial1.write(pkt, n);
+    }
+    {
+        int n = ubx_build_cfg_rate(pkt, sizeof(pkt), GPS_RATE_MS);
+        if (n > 0) Serial1.write(pkt, n);
+    }
+    Serial1.flush();                             // config fully clocked out
+#endif
     return s_gps_ok;
 }
 
 int gps_available() {
-    // TODO: return Serial1.available();
-    return 0;
+#ifdef ARDUINO
+    return Serial1.available();
+#else
+    return 0;                // host: drive gps_feed_byte() directly (tests)
+#endif
 }
 
 void gps_poll(GpsFix& fix) {
-    // TODO: read bytes, split on '\n', call gps_parse(line, fix).
+#ifdef ARDUINO
+    while (Serial1.available() > 0)
+        gps_feed_byte((char)Serial1.read(), fix);
+#else
     (void)fix;
+#endif
 }
 
-bool gps_healthy() { return s_gps_ok; }
+// Healthy = UART initialised AND at least one checksum-valid NMEA line seen
+// (so a wrong baud, dead module or unconnected RX all report unhealthy).
+bool gps_healthy() { return s_gps_ok && gps_lines_seen() > 0; }
 
 // --- LiDAR TFmini ----------------------------------------------------------
 static bool s_lidar_ok = false;

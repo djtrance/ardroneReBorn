@@ -46,18 +46,32 @@ static bool nmea_checksum_ok(const char* s) {
     return (toupper(star[1]) == want[0]) && (toupper(star[2]) == want[1]);
 }
 
+// Split a comma-separated body PRESERVING empty fields. strtok() collapses
+// consecutive delimiters, which would shift every index on a sentence with
+// empty fields — and a no-fix GGA/RMC is mostly empty, exactly the case the
+// GPS_LOSS failsafe must see.
+static int split_fields(char* body, char* tok[], int max) {
+    int n = 0;
+    char* p = body;
+    while (n < max) {
+        tok[n++] = p;
+        char* c = strchr(p, ',');
+        if (!c) break;
+        *c = '\0';
+        p = c + 1;
+    }
+    return n;
+}
+
 // ---------------------------------------------------------------------------
 // GGA — position fix
 // ---------------------------------------------------------------------------
 static bool parse_gga(char* body, GpsFix& fix) {
     // $GPGGA,hhmmss.ss,lat,N,lon,E,fix,numsv,hdop,alt,M,...
     char* tok[15];
-    int n = 0;
-    char* p = strtok(body, ",");
-    while (p && n < 15) { tok[n++] = p; p = strtok(NULL, ","); }
+    int n = split_fields(body, tok, 15);
     if (n < 10) return false;
 
-    // NOTE: buf+7 already consumed "$GPGGA,", so tok[0] is the UTC time.
     //   [0]=time [1]=lat [2]=N [3]=lon [4]=E [5]=quality [6]=sats
     //   [7]=hdop [8]=alt [9]=M ...
     if (tok[0] && *tok[0]) fix.utc = (uint32_t)atof(tok[0]);
@@ -65,13 +79,13 @@ static bool parse_gga(char* body, GpsFix& fix) {
     fix.num_sv      = (uint8_t)atoi(tok[6]);
     fix.hdop        = (float)atof(tok[7]);
     fix.alt_m       = (float)atof(tok[8]);
-    if (fix.fix_quality > 0 && tok[1] && tok[2] && tok[3] && tok[4]) {
+    if (fix.fix_quality > 0 && tok[1] && tok[1][0] && tok[3] && tok[3][0]) {
         fix.lat = nmea_to_deg(tok[1], tok[2][0]);
         fix.lon = nmea_to_deg(tok[3], tok[4][0]);
         fix.valid = true;
     } else {
-        fix.valid = false;
-    }
+        fix.valid = false;      // fix dropped: clear the stale flag NOW so
+    }                           // gps_trustworthy()/failsafe react immediately
     return true;
 }
 
@@ -79,25 +93,24 @@ static bool parse_gga(char* body, GpsFix& fix) {
 // RMC — velocity + course
 // ---------------------------------------------------------------------------
 static bool parse_rmc(char* body, GpsFix& fix) {
-    // buf+7 strips "$GPRMC,", so:
     //   [0]=time [1]=status [2]=lat [3]=N [4]=lon [5]=E
     //   [6]=knots [7]=course [8]=date ...
     char* tok[12];
-    int n = 0;
-    char* p = strtok(body, ",");
-    while (p && n < 12) { tok[n++] = p; p = strtok(NULL, ","); }
+    int n = split_fields(body, tok, 12);
     if (n < 8) return false;
 
     bool active = (tok[1] && tok[1][0] == 'A');
-    if (active) {
-        float knots = (float)atof(tok[6]);
-        fix.ground_mps = knots * 0.514444f;          // 1 knot = 0.5144 m/s
-        fix.course_deg = (float)atof(tok[7]);
-        if (tok[2] && tok[3] && tok[4] && tok[5]) {
-            fix.lat = nmea_to_deg(tok[2], tok[3][0]);
-            fix.lon = nmea_to_deg(tok[4], tok[5][0]);
-            fix.valid = true;
-        }
+    if (!active) {
+        fix.valid = false;      // status V (void) — no trustworthy position
+        return true;
+    }
+    float knots = (float)atof(tok[6]);
+    fix.ground_mps = knots * 0.514444f;          // 1 knot = 0.5144 m/s
+    fix.course_deg = (float)atof(tok[7]);
+    if (tok[2] && tok[2][0] && tok[4] && tok[4][0]) {
+        fix.lat = nmea_to_deg(tok[2], tok[3][0]);
+        fix.lon = nmea_to_deg(tok[4], tok[5][0]);
+        fix.valid = true;
     }
     return true;
 }
@@ -123,4 +136,97 @@ bool gps_parse(const char* line, GpsFix& fix) {
 bool gps_trustworthy(const GpsFix& f) {
     return f.valid && f.fix_quality >= 1 &&
            f.num_sv >= 6 && f.hdop > 0.0f && f.hdop <= GPS_MAX_HDOP;
+}
+
+// ---------------------------------------------------------------------------
+// Byte-stream front end — the u-blox 6 streams NMEA continuously, so the
+// UART ISR/poll hands us arbitrary slices. This assembles complete lines and
+// only counts checksum-valid ones (gps_lines_seen == "the module is talking
+// at the right baud", which is what gps_healthy() reports).
+// ---------------------------------------------------------------------------
+static char     s_line[GPS_LINE_MAX];
+static uint16_t s_line_len = 0;
+static uint32_t s_lines_seen = 0;
+
+void gps_line_reset() {
+    s_line_len  = 0;
+    s_lines_seen = 0;
+}
+
+uint32_t gps_lines_seen() { return s_lines_seen; }
+
+bool gps_feed_byte(char c, GpsFix& fix) {
+    if (c == '$') {
+        // New sentence header: drop whatever partial frame we were holding
+        // (recovers from a truncated frame or line noise mid-burst).
+        s_line_len = 0;
+    } else if (c == '\n' || c == '\r') {
+        if (s_line_len == 0) return false;      // blank line / CR-LF pair
+        s_line[s_line_len] = '\0';
+        s_line_len = 0;
+        if (nmea_checksum_ok(s_line)) s_lines_seen++;
+        return gps_parse(s_line, fix);
+    }
+    if (s_line_len >= (uint16_t)(sizeof(s_line) - 1)) {
+        s_line_len = 0;                         // overlong garbage: drop it
+        return false;
+    }
+    s_line[s_line_len++] = c;
+    return false;
+}
+
+void gps_feed(const char* data, size_t n, GpsFix& fix) {
+    for (size_t i = 0; i < n; ++i) gps_feed_byte(data[i], fix);
+}
+
+// ---------------------------------------------------------------------------
+// UBX config packets (u-blox 6 spec GPS.G6-SW-10018, §31 CFG-* messages)
+//
+// CK_A/CK_B = 8-bit Fletcher over class, id, length(2) and the payload —
+// verified against the spec's own worked example:
+//   CFG-RATE 200 ms => B5 62 06 08 06 00 C8 00 01 00 01 00 DE 6A
+// ---------------------------------------------------------------------------
+static void ubx_checksum(const uint8_t* p, size_t n, uint8_t* ck) {
+    uint8_t a = 0, b = 0;
+    for (size_t i = 0; i < n; ++i) { a = (uint8_t)(a + p[i]); b = (uint8_t)(b + a); }
+    ck[0] = a; ck[1] = b;
+}
+
+// UBX-CFG-RATE (0x06 0x08): measRate(ms) | navRate(cycles) | timeRef.
+// navRate is fixed at 1 on u-blox 5/6 (the spec says it cannot be changed);
+// timeRef 1 = GPS time. measRate floor 200 ms = 5 Hz, the NEO-6M maximum.
+int ubx_build_cfg_rate(uint8_t* out, size_t out_max, uint16_t meas_ms) {
+    if (!out || out_max < 14) return 0;
+    if (meas_ms < 200 || meas_ms > 1000) return 0;   // spec window we allow
+    static const uint8_t hdr[4] = { 0x06, 0x08, 0x06, 0x00 };
+    out[0] = 0xB5; out[1] = 0x62;
+    memcpy(out + 2, hdr, 4);
+    out[6]  = (uint8_t)(meas_ms & 0xFF);        // measRate LE
+    out[7]  = (uint8_t)(meas_ms >> 8);
+    out[8]  = 0x01; out[9] = 0x00;              // navRate = 1 (fixed on u-blox 6)
+    out[10] = 0x01; out[11] = 0x00;             // timeRef = GPS
+    ubx_checksum(out + 2, 10, out + 12);
+    return 14;
+}
+
+// UBX-CFG-MSG (0x06 0x01), 8-byte payload form: msgClass, msgID, then the
+// rate for each I/O target (DDC, UART1, UART2, USB, SPI, reserved). We only
+// ever touch UART1 — everything else stays 0.
+// NMEA sentence class is 0xF0: GGA=00 GLL=01 GSA=02 GSV=03 RMC=04 VTG=05.
+int ubx_build_cfg_msg_nmea(uint8_t* out, size_t out_max,
+                           uint8_t nmea_id, uint8_t uart1_rate) {
+    if (!out || out_max < 16) return 0;
+    if (uart1_rate > 1) return 0;                // on/off + 1x per epoch only
+    out[0] = 0xB5; out[1] = 0x62;
+    out[2] = 0x06; out[3] = 0x01;                // class CFG, id MSG
+    out[4] = 0x08; out[5] = 0x00;                // payload length 8
+    out[6] = 0xF0; out[7] = nmea_id;             // NMEA sentence
+    out[8]  = 0x00;                              // DDC   (I2C)
+    out[9]  = uart1_rate;                        // UART1 <- us
+    out[10] = 0x00;                              // UART2
+    out[11] = 0x00;                              // USB
+    out[12] = 0x00;                              // SPI
+    out[13] = 0x00;                              // reserved
+    ubx_checksum(out + 2, 12, out + 14);
+    return 16;
 }

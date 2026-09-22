@@ -2,6 +2,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 struct GpsFix {
     double lat, lon;       // degrees
@@ -48,3 +49,20 @@ bool gps_parse(const char* line, GpsFix& fix);
 // Checklist G4 gate: true when fix quality + satellite count + HDOP are
 // trustworthy enough to arm / trust for RTH (C4).
 bool gps_trustworthy(const GpsFix& f);
+
+// --- Byte-stream front end (sensors.cpp pumps UART1 bytes through this) ----
+// Assembles a line buffer, parses on '\n'/'\r', and resynchronises on a '$'
+// so a truncated or corrupted frame never poisons the next good one.
+void     gps_line_reset();               // drop partial line + zero counter
+bool     gps_feed_byte(char c, GpsFix& fix);   // true when `fix` was updated
+void     gps_feed(const char* data, size_t n, GpsFix& fix);
+uint32_t gps_lines_seen();               // checksum-valid lines since reset
+                                             // (== "the module is talking")
+
+// --- u-blox 6 (UBX) config packets — sent by gps_init() at boot -----------
+// Pure builders: sync (B5 62) + class/id/len + payload + 8-bit Fletcher
+// checksum over class..payload (u-blox 6 spec §31). Return the total packet
+// length in bytes, or 0 if `out_max` is too small / a value is out of spec.
+int ubx_build_cfg_rate(uint8_t* out, size_t out_max, uint16_t meas_ms);
+int ubx_build_cfg_msg_nmea(uint8_t* out, size_t out_max,
+                           uint8_t nmea_id, uint8_t uart1_rate);

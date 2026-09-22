@@ -194,9 +194,23 @@
 #define IMU_GYRO_FS_DPS         2000
 #define IMU_ACCEL_FS_G          16
 // BARO_I2C_ADDR and MAG_I2C_ADDR come from the IMU board block above (C2/C3).
-#define GPS_BAUD                9600     // NMEA (C4)
+// --- GPS — u-blox 6 (NEO-6M), checklist C4 --------------------------------
+// Factory defaults (u-blox 6 Receiver Descr. & Prot. Spec, GPS.G6-SW-10018,
+// App. A.5/A.11): UART1 = 9600 8N1, NMEA output GGA+GLL+GSA+GSV+RMC+VTG+TXT
+// at 1 Hz (measRate 1000 ms).
+//
+// gps_init() re-configures at every boot (no blind baud change, stays at the
+// factory 9600) by sending UBX-CFG-MSG + UBX-CFG-RATE:
+//   keep GGA + RMC (all the parser reads), silence GLL/GSA/GSV/VTG,
+//   measRate = GPS_RATE_MS  ->  4 Hz nav epochs.
+// Bandwidth: ~144 B/cycle * 4 Hz = ~576 B/s vs ~960 B/s line rate at 9600,
+// so the UART has headroom (spec warns the module drops output when its
+// TX buffer overflows).
+#define GPS_BAUD                9600     // factory default, never re-bauded
+#define GPS_RATE_MS             250      // 4 Hz nav epochs (spec floor: 200 ms)
 #define GPS_MIN_FIX_S           10       // seconds of stable 3D fix
 #define GPS_MAX_HDOP            2.0f     // trust threshold
+#define GPS_LINE_MAX            128      // NMEA max 82 B; 128 absorbs bursts
 #define LIDAR_BAUD              115200
 #define LD2450_BAUD             256000   // NOTE: unusual rate (C7)
 #define LD2450_FRAME_LEN        30

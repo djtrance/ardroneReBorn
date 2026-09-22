@@ -22,12 +22,15 @@ bool mag_init();
 bool mag_read(Vec3& field_ut);      // microtesla, body frame
 bool mag_healthy();
 
-// --- GPS (UART NMEA) -------------------------------------------------------
+// --- GPS — u-blox 6 / NEO-6M (UART1 NMEA) ----------------------------- (C4)
+// gps_init(): UART1 @ 9600 8N1 (factory baud), sends UBX-CFG-MSG to keep
+// GGA+RMC / silence GLL+GSA+GSV+VTG, then UBX-CFG-RATE for GPS_RATE_MS
+// (4 Hz). gps_healthy(): the module has produced a checksum-valid line.
+// Byte-level path (gps_feed_byte / gps_feed / UBX builders) lives in
+// gps_nav.h and is host-unit-tested.
 bool gps_init();
-// Pump bytes from the UART; call gps_available() then gps_poll().
-int  gps_available();
-// Reads up to `max` bytes, parses complete sentences, updates `fix`.
-void gps_poll(GpsFix& fix);
+int  gps_available();               // bytes waiting in the UART buffer
+void gps_poll(GpsFix& fix);         // pump UART -> line assembler -> parser
 bool gps_healthy();
 
 // --- LiDAR TFmini ----------------------------------------------------------

@@ -38,9 +38,9 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 | Geofence circle + altitude (G5) | ✅ implemented (independent layer) |
 | Failsafe FSM + preflight gate (H1/H6) | ✅ states + thresholds defined |
 | `config.h` parameter layer (E5) | ✅ all gains/limits centralized |
-| Host unit tests (J2 / E6) | ✅ **217 assertions passing** (111 core + 106 config/RC/sensor) |
+| Host unit tests (J2 / E6) | ✅ **251 assertions passing** (111 core + 140 config/RC/sensor) |
 | LD2450 frame parser + track matcher (C7) | ✅ real parser — **verify offsets vs firmware** |
-| NMEA + Haversine port (C4) | ✅ ported + tested |
+| GPS driver: u-blox 6 UART1 + NMEA/UBX (C4) | ✅ real driver — GGA/RMC @ 4 Hz, byte-stream parser + UBX config, tested |
 | Pin map (B2) | ✅ written into `config.h` — **still needs bench verification** |
 | IMU board abstraction (C1/C2/C3) | ✅ `#if`-selected **GY-91 / GY-87** drivers + calibration |
 | RC input: SBUS + Spektrum decode (H2) | ✅ decoders + mapping — **needs receiver bench check** |
@@ -50,7 +50,7 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 
 **Still open / blocking**:
 - **§A airframe numbers** (A3 CG, A6 `V_stall`) — *physical blocker, needs the wing*
-- Real **GPS (C4) / LiDAR (C6) drivers** are stubs — must land before §C closes
+- Real **LiDAR (C6) driver** is a stub — must land before §C closes
 - **J1 wing SIL plant model** not started
 - Battery ADC (B4/H3) — hardcoded placeholder
 - **Spektrum byte-2 status layout** — two sources disagree, bench-validate against a real receiver
@@ -134,7 +134,7 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
   | ESC throttle | LEDC ch2 | **27** | [x] defined |
   | IMU + baro + mag (GY-91 / GY-87) | I2C | **21 / 22** (SDA/SCL) | [x] defined |
   | IMU (SPI variant, reserved) | SPI | CS **5**, SCK 18, MISO 19, MOSI 23 | [ ] not used yet |
-  | GPS (u-blox) | UART1 | RX **13** / TX **14** | [x] defined |
+  | GPS (u-blox 6 / NEO-6M) | UART1 | RX **13** / TX **14** | [x] defined |
   | LiDAR (TFmini) | UART / soft-serial | RX **34** (input-only) | [x] defined |
   | HLK-LD2450 radar | UART | RX **35** | [x] defined |
   | Battery voltage divider | ADC1 | **32** | [x] defined (no ADC code yet) |
@@ -188,13 +188,19 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
   - [ ] Hard/soft-iron calibration (min/max ellipsoid): [ ]
   - [ ] Mounted away from ESC/battery current path: [ ] distance = ____ mm
   - [ ] Heading fusion weight vs gyro heading decided: [ ]
-- [ ] **C4. GPS** — model: ______ (NEO-6M / NEO-M8N)
-  - [ ] Protocol: NMEA @ ____ baud, which sentences enabled: ______
-  - [ ] Fix quality required before arming: [ ] 3D fix + ____ s stable
-  - [ ] HDOP threshold to trust position: [ ] ____ (recommend < 2.0)
+- [ ] **C4. GPS** — model: **u-blox 6 (NEO-6M)**
+  - [x] Protocol: NMEA @ **9600 baud** (factory, never re-bauded), sentences
+        enabled: **GGA + RMC @ 4 Hz** (`GPS_RATE_MS` 250 ms); GLL/GSA/GSV/VTG
+        silenced via UBX-CFG-MSG so 9600 keeps ~40% line headroom
+  - [ ] Fix quality required before arming: [ ] `gps_trustworthy()` = quality≥1
+        + ≥6 SV + HDOP≤2.0, **not yet** gated on the `GPS_MIN_FIX_S`=10 s timer
+  - [x] HDOP threshold to trust position: [x] **2.0** (`GPS_MAX_HDOP`)
   - [ ] Antenna placement (sky view, away from ESP32 WiFi): [ ]
-  - [ ] Groundspeed + course-over-ground read: [ ]
-  - [ ] Reused parser from `src/navigation/gps.c`: [ ] ported
+  - [x] Groundspeed + course-over-ground read: [x] RMC → 22.4 kt = 11.52 m/s (test)
+  - [x] Reused parser from `src/navigation/gps.c`: [x] ported
+  - [x] Byte-stream robustness: [x] checksum gate, `$` resync, truncation +
+        overflow recovery, **no-fix sentence clears `valid`** (feeds GPS_LOSS)
+  - [ ] Live on the wire (fix at 4 Hz, satellites, HDOP): [ ] bench — S1
 - [ ] **C5. Airspeed estimation (N2)** — method:
   - [ ] [ ] **GPS + wind model** (start here, no extra hardware)
   - [ ] [ ] Pitot-static tube +差分 ADC / MS4525DO (I2C) — *recommended for P2*
@@ -536,9 +542,11 @@ Collecting items we don't want to lose but aren't blocking yet:
 | 2026-09-22 | E5/I5 | `Settings` blob (magic/version/size + CRC-16/CCITT + validate/clamp) persisted in NVS, edited over WiFi portal |
 | 2026-09-22 | I1 | Telemetry feasibility: `docs/rc-and-telemetry.md` — SBUS is one-way; A. SBUS+S.Port · B. **FPort** · C. DSMX · D. FlySky · E. WiFi |
 | 2026-09-22 | J2/E6 | **217 host unit tests passing** (111 core + 106 config/RC/sensor). Both IMU variants compile clean (`make test IMU=87` / `IMU=91`) |
+| 2026-09-22 | C4 | **Real GPS driver landed** — u-blox 6 (NEO-6M) on UART1 @ 9600: byte-stream assembler (checksum gate, `$` resync, truncation/overflow recovery), UBX-CFG-MSG keep GGA+RMC / drop GLL+GSA+GSV+VTG, UBX-CFG-RATE 4 Hz, `gps_healthy()` = line actually seen. Fixed parser bug: `strtok` collapsed empty fields → no-fix GGA left a **stale `valid`** (would delay GPS_LOSS); RMC status `V` now clears it too. **251 host unit tests passing** (111 + 140), both IMU variants |
 
 > **Next iteration target**: close **§A** (airframe numbers — needs the actual
-> wing) and finish **§B** (B3 PWM bench verification), then **§C** with the two
-> missing drivers (C4 GPS, C6 LiDAR). In parallel, start **J1** (6-DOF wing
-> SIL) so F1/F2/F3 gains can be identified before any hardware flies, and
-> bench-validate the Spektrum frame status byte against a real receiver (H2).
+> wing) and finish **§B** (B3 PWM bench verification), then **§C** with the one
+> missing driver (**C6 LiDAR**) + C4 live-on-the-wire check. In parallel, start
+> **J1** (6-DOF wing SIL) so F1/F2/F3 gains can be identified before any
+> hardware flies, and bench-validate the Spektrum frame status byte against a
+> real receiver (H2).
