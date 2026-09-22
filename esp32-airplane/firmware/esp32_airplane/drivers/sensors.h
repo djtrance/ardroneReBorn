@@ -32,6 +32,7 @@ bool gps_init();
 int  gps_available();               // bytes waiting in the UART buffer
 void gps_poll(GpsFix& fix);         // pump UART -> line assembler -> parser
 bool gps_healthy();
+uint32_t gps_baud();                // rate negotiated at boot (9600/115200)
 
 // --- LiDAR TFmini ----------------------------------------------------------
 struct LidarSample { float range_m; bool valid; };

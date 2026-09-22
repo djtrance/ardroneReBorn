@@ -2,8 +2,9 @@
 #include "imu_board.h"
 #include "../config.h"
 #include <math.h>
+#include <string.h>            // memset (GPS probe scratch fix)
 #ifdef ARDUINO
-  #include <Arduino.h>          // Serial1, delay — GPS UART (C4)
+  #include <Arduino.h>          // Serial1, delay/millis — GPS UART (C4)
 #endif
 
 // ===========================================================================
@@ -56,16 +57,28 @@ bool mag_healthy() { return s_mag_ok; }
 
 // --- GPS — u-blox 6 (NEO-6M) on UART1, checklist C4 -----------------------
 // Factory default is 9600 8N1 with GGA+GLL+GSA+GSV+RMC+VTG+TXT at 1 Hz
-// (u-blox 6 spec App. A.5/A.11). We keep the factory baud (never re-baud —
-// a failed baud change would leave the module mute with no ACK to notice)
-// and instead slim the output to GGA+RMC at GPS_RATE_MS (4 Hz), which fits
-// the 9600-baud line with ~40% headroom.
+// (u-blox 6 spec App. A.5/A.11). Boot sequence:
 //
-// Everything is re-sent on every boot, so a factory-fresh or wiped module
-// needs no manual u-center setup. No ACK is read: UBX-CFG-* is idempotent,
-// and the parser only ever accepts checksum-valid NMEA, so a half-applied
-// config degrades to "fewer sentences", never to garbage fixes.
-static bool s_gps_ok = false;
+//   1. Open 9600 and push the full config blindly (5 Hz + GGA/RMC only).
+//      At factory baud the module flips within a frame, so the probe below
+//      sees it quickly.
+//   2. Probe for a checksum-valid NMEA line ("line seen" == "it lives on
+//      this baud"). Not seen? Try GPS_BAUD_HI — a module whose config
+//      survived in battery-backup RAM boots at 115200; re-push config there.
+//      Nowhere? assume factory and let gps_poll() keep listening — health
+//      stays false so preflight blocks arming.
+//   3. Alive at 9600 and GPS_USE_HI_BAUD: UBX-CFG-PRT -> 115200, switch our
+//      UART, and PROBE AGAIN. Only a line seen on the new baud counts as
+//      success; otherwise revert (with its own re-probe, covering a module
+//      that did switch but whose lines were missed) so the GPS is never left
+//      mute. Win: 145-byte GGA latency 151 ms -> 13 ms, plus ~16x headroom
+//      for GSV/GSA diagnostics later.
+//
+// Nothing is saved to flash: every packet is rebuilt on each boot, so a
+// factory-fresh or wiped module needs no u-center setup. No ACK is read —
+// UBX-CFG-* is idempotent and the probe (not the ACK) is what decides.
+static bool     s_gps_ok = false;
+static uint32_t s_gps_baud = GPS_BAUD;
 
 // NMEA sentence ids we toggle (u-blox class 0xF0). We parse GGA (position)
 // and RMC (speed/course) only — GGA also carries hdop/num_sv, so GSA/GSV
@@ -73,13 +86,34 @@ static bool s_gps_ok = false;
 enum { NMEA_GGA = 0x00, NMEA_GLL = 0x01, NMEA_GSA = 0x02,
        NMEA_GSV = 0x03, NMEA_RMC = 0x04, NMEA_VTG = 0x05 };
 
-bool gps_init() {
-    gps_line_reset();
-    s_gps_ok = true;
 #ifdef ARDUINO
-    Serial1.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
-    delay(100);                                  // module finishes booting
-    uint8_t pkt[16];
+static void gps_uart_begin(uint32_t baud) {
+    Serial1.end();
+    Serial1.begin(baud, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+    while (Serial1.available() > 0) (void)Serial1.read();   // drop stale/garbage
+}
+
+// Block up to `ms` waiting for ONE checksum-valid NMEA line. The module
+// emits NMEA from boot whatever its rate, so this doubles as a baud probe.
+// (Timeout is >1 full cycle at the factory 1 Hz rate — see config.h.)
+static bool gps_wait_line(uint32_t ms) {
+    GpsFix scratch;
+    memset(&scratch, 0, sizeof(scratch));
+    uint32_t t0    = millis();
+    uint32_t seen0 = gps_lines_seen();
+    while (millis() - t0 < ms) {
+        while (Serial1.available() > 0)
+            gps_feed_byte((char)Serial1.read(), scratch);
+        if (gps_lines_seen() > seen0) return true;
+        delay(2);
+    }
+    return false;
+}
+
+// Rate + sentence slimming (GGA+RMC every epoch, everything else off),
+// sent at whatever baud the module was last heard on.
+static void gps_send_config() {
+    uint8_t pkt[28];
     static const uint8_t k_keep[] = { NMEA_GGA, NMEA_RMC };
     static const uint8_t k_drop[] = { NMEA_GLL, NMEA_GSA, NMEA_GSV, NMEA_VTG };
     for (unsigned i = 0; i < sizeof(k_keep); ++i) {
@@ -90,11 +124,59 @@ bool gps_init() {
         int n = ubx_build_cfg_msg_nmea(pkt, sizeof(pkt), k_drop[i], 0);
         if (n > 0) Serial1.write(pkt, n);
     }
-    {
-        int n = ubx_build_cfg_rate(pkt, sizeof(pkt), GPS_RATE_MS);
-        if (n > 0) Serial1.write(pkt, n);
+    int n = ubx_build_cfg_rate(pkt, sizeof(pkt), GPS_RATE_MS);
+    if (n > 0) Serial1.write(pkt, n);
+    Serial1.flush();                           // config fully clocked out
+}
+#endif
+
+bool gps_init() {
+    gps_line_reset();
+    s_gps_ok    = true;
+    s_gps_baud  = GPS_BAUD;
+#ifdef ARDUINO
+    // 1) Factory-side attempt: config first, then listen.
+    gps_uart_begin(GPS_BAUD);
+    gps_send_config();
+    bool alive = gps_wait_line(GPS_PROBE_TIMEOUT_MS);
+
+    // 2) Maybe the module retained a previous config at the high baud.
+    if (!alive) {
+        gps_uart_begin(GPS_BAUD_HI);
+        if (gps_wait_line(GPS_PROBE_TIMEOUT_MS)) {
+            alive = true;
+            s_gps_baud = GPS_BAUD_HI;
+            gps_send_config();
+        } else {
+            gps_uart_begin(GPS_BAUD);        // leave the UART where factory
+        }                                    // would be; polls keep trying
     }
-    Serial1.flush();                             // config fully clocked out
+
+    // 3) Raise the line rate — verified, never blind.
+#if GPS_USE_HI_BAUD
+    if (alive && s_gps_baud != GPS_BAUD_HI) {
+        uint8_t pkt[28];
+        int n = ubx_build_cfg_prt_uart(pkt, sizeof(pkt), GPS_BAUD_HI);
+        if (n > 0) { Serial1.write(pkt, n); Serial1.flush(); }
+        gps_uart_begin(GPS_BAUD_HI);         // module re-bauds as it processes
+        if (gps_wait_line(GPS_PROBE_TIMEOUT_MS)) {
+            s_gps_baud = GPS_BAUD_HI;         // verified on the new rate
+        } else {
+            gps_uart_begin(GPS_BAUD);        // CFG-PRT didn't take...
+            if (gps_wait_line(GPS_PROBE_TIMEOUT_MS)) {
+                s_gps_baud = GPS_BAUD;        // ...module stayed at factory
+            } else {
+                gps_uart_begin(GPS_BAUD_HI); // ...or it DID switch and we just
+                if (gps_wait_line(GPS_PROBE_TIMEOUT_MS)) {   // missed the lines
+                    s_gps_baud = GPS_BAUD_HI;
+                } else {
+                    gps_uart_begin(GPS_BAUD); // dead either way: sit on factory
+                    s_gps_baud = GPS_BAUD;
+                }
+            }
+        }
+    }
+#endif
 #endif
     return s_gps_ok;
 }
@@ -119,6 +201,9 @@ void gps_poll(GpsFix& fix) {
 // Healthy = UART initialised AND at least one checksum-valid NMEA line seen
 // (so a wrong baud, dead module or unconnected RX all report unhealthy).
 bool gps_healthy() { return s_gps_ok && gps_lines_seen() > 0; }
+
+// Line rate actually negotiated at boot (telemetry / init log, checklist C4).
+uint32_t gps_baud() { return s_gps_baud; }
 
 // --- LiDAR TFmini ----------------------------------------------------------
 static bool s_lidar_ok = false;

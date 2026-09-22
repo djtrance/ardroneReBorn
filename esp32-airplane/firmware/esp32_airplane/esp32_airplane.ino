@@ -243,9 +243,9 @@ void setup() {
     ok &= gps_init();
     ok &= lidar_init();
 
-    Serial.printf("init: imu=%d baro=%d mag=%d gps=%d lidar=%d rc=%s\n",
+    Serial.printf("init: imu=%d baro=%d mag=%d gps=%d@%u lidar=%d rc=%s\n",
                   imu_healthy(), baro_healthy(), mag_healthy(),
-                  gps_healthy(), lidar_healthy(),
+                  gps_healthy(), (unsigned)gps_baud(), lidar_healthy(),
                   g_set.rc.proto == RC_PROTO_NONE ? "off" : "on");
     if (!ok) Serial.println(F("!! sensor init incomplete — preflight will block arming"));
 

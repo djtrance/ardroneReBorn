@@ -66,3 +66,6 @@ uint32_t gps_lines_seen();               // checksum-valid lines since reset
 int ubx_build_cfg_rate(uint8_t* out, size_t out_max, uint16_t meas_ms);
 int ubx_build_cfg_msg_nmea(uint8_t* out, size_t out_max,
                            uint8_t nmea_id, uint8_t uart1_rate);
+// UBX-CFG-PRT: re-baud UART1 (the line-rate jump to GPS_BAUD_HI). sensors.cpp
+// verifies it took by probing for NMEA on the new baud and reverts if mute.
+int ubx_build_cfg_prt_uart(uint8_t* out, size_t out_max, uint32_t baud);

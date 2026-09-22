@@ -215,7 +215,10 @@
 // Bandwidth at 5 Hz with only GGA+RMC: ~145 B/cycle * 5 = ~725 B/s vs
 // ~960 B/s at 9600 (75% line utilisation, spec warns the module drops
 // output when its TX buffer overflows — this keeps headroom).
-#define GPS_BAUD                9600     // factory default, never re-bauded
+#define GPS_BAUD                9600     // factory default (probe start point)
+#define GPS_BAUD_HI             115200   // target rate after UBX-CFG-PRT
+#define GPS_USE_HI_BAUD         1        // 0 = stay factory (debug escape hatch)
+#define GPS_PROBE_TIMEOUT_MS    1100     // > one full cycle at factory 1 Hz
 #define GPS_RATE_MS             200      // 5 Hz = NEO-6 datasheet maximum
 #define GPS_MIN_FIX_S           10       // seconds of stable 3D fix
 #define GPS_MAX_HDOP            2.0f     // trust threshold

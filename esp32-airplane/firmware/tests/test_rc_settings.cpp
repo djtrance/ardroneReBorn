@@ -557,6 +557,25 @@ static void test_gps_ublox6() {
        "CFG-RATE rejects 10 Hz — out of spec for NEO-6 (packet loss/resets)");
     ck(ubx_build_cfg_rate(pkt, 13, 200) == 0, "CFG-RATE rejects short buffer");
 
+    // --- UBX-CFG-PRT: UART1 -> 115200 8N1 (the verified line-rate jump) ----
+    static const uint8_t want_prt[28] = {
+        0xB5,0x62,0x06,0x00,0x14,0x00,0x01,0x00,0x00,0x00,0xD0,0x08,0x00,0x00,
+        0x00,0xC2,0x01,0x00,0x03,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0xBC,0x5E };
+    uint8_t prt[28];
+    n = ubx_build_cfg_prt_uart(prt, sizeof(prt), 115200);
+    ck(n == 28 && memcmp(prt, want_prt, 28) == 0,
+       "CFG-PRT UART1 -> 115200 8N1 (mode 0x8D0, UBX|NMEA in/out)");
+    n = ubx_build_cfg_prt_uart(prt, sizeof(prt), 9600);
+    ck(n == 28 && prt[14] == 0x80 && prt[15] == 0x25 &&
+       prt[16] == 0x00 && prt[17] == 0x00,
+       "CFG-PRT baud field is little-endian (9600 = 0x2580)");
+    ck(ubx_build_cfg_prt_uart(prt, sizeof(prt), 12345) == 0,
+       "CFG-PRT rejects a baud outside the spec list");
+    ck(ubx_build_cfg_prt_uart(prt, 27, 115200) == 0,
+       "CFG-PRT rejects short buffer");
+    ck(GPS_USE_HI_BAUD == 1 && GPS_BAUD_HI == 115200,
+       "config enables the verified jump to 115200");
+
     // --- UBX-CFG-MSG: GSV off, RMC on, UART1 only -------------------------
     static const uint8_t want_gsv[16] = {
         0xB5,0x62,0x06,0x01,0x08,0x00,0xF0,0x03,

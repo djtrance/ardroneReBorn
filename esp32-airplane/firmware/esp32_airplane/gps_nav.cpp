@@ -230,3 +230,38 @@ int ubx_build_cfg_msg_nmea(uint8_t* out, size_t out_max,
     ubx_checksum(out + 2, 12, out + 14);
     return 16;
 }
+
+// UBX-CFG-PRT (0x06 0x00), 20-byte UART payload: portID, reserved0, txReady,
+// mode, baudRate, inProtoMask, outProtoMask, flags, reserved2.
+//   mode 0x000008D0 = 8 data bits, no parity, 1 stop bit (u-center's value:
+//     charLen bits7-6 = 11, parity bits11-9 = 10x ("no parity"), stop = 00)
+//   baud limited to the spec's allowed list (4800..460800).
+// This is the packet that raises the GPS line rate: a 145-byte GGA takes
+// 151 ms to clock out at 9600 vs 13 ms at 115200 — i.e. the fix the nav loop
+// sees is that much fresher.
+int ubx_build_cfg_prt_uart(uint8_t* out, size_t out_max, uint32_t baud) {
+    if (!out || out_max < 28) return 0;
+    switch (baud) {
+        case 4800: case 9600: case 19200: case 38400:
+        case 57600: case 115200: case 230400: case 460800:
+            break;
+        default: return 0;                    // not in the spec's baud list
+    }
+    out[0] = 0xB5; out[1] = 0x62;
+    out[2] = 0x06; out[3] = 0x00;             // class CFG, id PRT
+    out[4] = 0x14; out[5] = 0x00;             // payload length 20
+    out[6]  = 0x01;                           // portID = UART1
+    out[7]  = 0x00;                           // reserved0
+    out[8]  = 0x00; out[9] = 0x00;            // txReady = off
+    out[10] = 0xD0; out[11] = 0x08; out[12] = 0x00; out[13] = 0x00;  // 8N1
+    out[14] = (uint8_t)(baud & 0xFF);         // baudRate LE
+    out[15] = (uint8_t)((baud >> 8) & 0xFF);
+    out[16] = (uint8_t)((baud >> 16) & 0xFF);
+    out[17] = (uint8_t)((baud >> 24) & 0xFF);
+    out[18] = 0x03; out[19] = 0x00;           // inProto  = UBX | NMEA
+    out[20] = 0x03; out[21] = 0x00;           // outProto = UBX | NMEA
+    out[22] = 0x00; out[23] = 0x00;           // flags
+    out[24] = 0x00; out[25] = 0x00;           // reserved2
+    ubx_checksum(out + 2, 24, out + 26);
+    return 28;
+}
