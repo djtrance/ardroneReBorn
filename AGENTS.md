@@ -89,7 +89,8 @@ parrotFramework/
 ├── AGENTS.md                  # this file
 ├── docs/                      # technical specs (OMAP3530, H.264, protocols)
 │   ├── wfb-integration.md     # wifibroadcast + UVC camera design
-│   └── hardware-upgrades.md   # comprehensive hardware upgrade matrix
+│   ├── hardware-upgrades.md   # comprehensive hardware upgrade matrix
+│   └── auto-recovery-navigation.md  # motor-fail failsafe + nav + LD2450 radar
 ├── src/                       # C source code
 │   ├── main.c                 # standalone drone_encoder binary
 │   ├── dsp_init_main.c        # standalone DSP init utility
