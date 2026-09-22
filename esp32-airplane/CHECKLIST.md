@@ -31,14 +31,14 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 | Area | State |
 |------|-------|
 | Elevon mixing + differential (D1/D2) | ✅ code written — **signs NOT yet bench-validated** |
-| ADRC-lite (ESO + NLSEF) + `b0 ∝ q` scheduling (F1) | ✅ initial — needs SIL gain ID |
+| ADRC-lite (ESO + NLSEF) + `b0 ∝ q` scheduling (F1) | ✅ **b0 identified in SIL: 87/75 rad/s² @ 15 m/s (J1)** |
 | Envelope protection: stall / bank / Vne / g (F3) | ✅ code written — needs SIL test |
 | L1 guidance (G2) | ✅ chosen + implemented |
 | Wing-specific RTH + loiter + glide + flare (G4) | ✅ sequence written — **not SIL-tested yet** |
 | Geofence circle + altitude (G5) | ✅ implemented (independent layer) |
 | Failsafe FSM + preflight gate (H1/H6) | ✅ states + thresholds defined |
 | `config.h` parameter layer (E5) | ✅ all gains/limits centralized |
-| Host unit tests (J2 / E6) | ✅ **257 assertions passing** (111 core + 146 config/RC/sensor) |
+| Host unit tests (J2 / E6) | ✅ **321 assertions**: 257 firmware (111 core + 146 config/RC/sensor) + **64 wing-SIL (J1)** |
 | LD2450 frame parser + track matcher (C7) | ✅ real parser — **verify offsets vs firmware** |
 | GPS driver: u-blox 6 UART1 + NMEA/UBX (C4) | ✅ real driver — GGA/RMC @ 4 Hz, byte-stream parser + UBX config, tested |
 | Pin map (B2) | ✅ written into `config.h` — **still needs bench verification** |
@@ -51,7 +51,6 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 **Still open / blocking**:
 - **§A airframe numbers** (A3 CG, A6 `V_stall`) — *physical blocker, needs the wing*
 - Real **LiDAR (C6) driver** is a stub — must land before §C closes
-- **J1 wing SIL plant model** not started
 - Battery ADC (B4/H3) — hardcoded placeholder
 - **Spektrum byte-2 status layout** — two sources disagree, bench-validate against a real receiver
 
@@ -458,12 +457,12 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 
 ## J. Software-in-the-Loop & test plan (P0 → P1)
 
-- [ ] **J1. Wing plant model in SIL**
-  - [ ] Extend `tools/simulator/` with a **6-DOF fixed-wing** model: [ ]
-  - [ ] Params: mass, `Ixx/Iyy/Izz`, `CL/CY/Cd`, control derivatives, thrust curve: [ ]
-  - [ ] Wind + gust model (reuse quad `wind` model): [ ]
-  - [ ] Stall model (lift curve breakdown) — **needed to test envelope protection**: [ ]
-  - [ ] Elevon mixing + ESC lag modeled: [ ]
+- [x] **J1. Wing plant model in SIL** — `tools/simulator/wing_plant.{h,cpp}` + `test_wing_sil` (64 assertions, wired into `make check`)
+  - [x] **6-DOF fixed-wing**: RK4, body axes with ω×v, Euler 3-2-1, gravity force-only: [64/64 green]
+  - [x] Params: mass/S/rho/V_CRUISE from `config.h`; inertia + aero + thrust = §A placeholders; **exact level trim** (`L = W − T·sinα`, `Cm0` = CG placed at V_CRUISE): [ ]
+  - [x] Steady **wind** input (relative-velocity path): [ ] gust time-series still open
+  - [x] **Stall model** — linear→flat-plate blend over `[α_st, α_st+0.15]`: CL falls **and** CD jumps past stall (feeds F3 tests): [ ]
+  - [ ] Elevon µs mapping + **ESC lag** modeled (SIL injects at controller-intent level; D1/B3 bench): [ ]
 - [ ] **J2. Host unit tests** (mirror `make check`)
   - [ ] elevon mixing sign tests: [ ]
   - [ ] ADRC step + gust rejection tests: [ ]
@@ -554,10 +553,10 @@ Collecting items we don't want to lose but aren't blocking yet:
 | 2026-09-22 | C4 | **Real GPS driver landed** — u-blox 6 (NEO-6M) on UART1 @ 9600: byte-stream assembler (checksum gate, `$` resync, truncation/overflow recovery), UBX-CFG-MSG keep GGA+RMC / drop GLL+GSA+GSV+VTG, UBX-CFG-RATE 4 Hz, `gps_healthy()` = line actually seen. Fixed parser bug: `strtok` collapsed empty fields → no-fix GGA left a **stale `valid`** (would delay GPS_LOSS); RMC status `V` now clears it too. **251 host unit tests passing** (111 + 140), both IMU variants |
 | 2026-09-22 | C4 | Rate bumped 4 → **5 Hz** (`GPS_RATE_MS` 200 ms) = the **NEO-6 datasheet maximum** (GPS.G6-HW-09005 "Maximum Navigation update rate: 5 Hz"; u-blox support: faster ⇒ packet loss + abend/reset). **10 Hz rejected as out-of-spec for this hardware** — needs NEO-M8N (10 Hz) + CFG-PRT→115200. Bandwidth at 5 Hz: 725/960 B/s @9600. **252 tests** (111 + 141) |
 | 2026-09-22 | C4 | **Line rate raised 9600 → 115200** via UBX-CFG-PRT with a **probe handshake**: config pushed at 9600 → probe for NMEA → not found? probe 115200 (retained-config modules) → CFG-PRT jump → **probe-verify on the new baud, revert with re-probe on failure** (GPS never left mute). Fix latency 151 → 13 ms/sentence; init log shows `gps=1@115200`. **257 tests** (111 + 146) |
+| 2026-09-22 | **J1** | **6-DOF wing SIL landed** (`tools/simulator/wing_plant.{h,cpp}` + `test_wing_sil`, **64 assertions**, in `make check`): RK4 body-axes plant (ω×v, gravity force-only), exact level-flight trim (`L=W−T·sinα`; `Cm0` = CG at V_CRUISE), stall break (linear→flat-plate), steady-wind input, control signs = controller intent. **b0 identified: roll 87.3 / pitch 75.2 rad/s² @15 m/s → written to config (`B0_ROLL_REF` 9→87, `B0_PITCH_REF` 6→75)** — old values were ~10× low (ADRC output would have saturated against the real plant). Closed-loop over the actual `control.cpp`: level hold, roll-step tracking + return, bank clamp @50°, **stall override beats a full nose-up stick and clears on recovery**, V_NE flag, surface slew ≤0.01745/step, airspeed PI, 4 s random-stick fuzz. **64 SIL + 257 firmware green** (both IMUs) |
 
-> **Next iteration target**: close **§A** (airframe numbers — needs the actual
-> wing) and finish **§B** (B3 PWM bench verification), then **§C** with the one
-> missing driver (**C6 LiDAR**) + C4 live-on-the-wire check. In parallel, start
-> **J1** (6-DOF wing SIL) so F1/F2/F3 gains can be identified before any
-> hardware flies, and bench-validate the Spektrum frame status byte against a
-> real receiver (H2).
+> **Next iteration target**: **J1 done** (b0 identified, F1/F2/F3 closed-loop
+> green). Next: **C6 LiDAR** (last §C stub) + close **§A** (airframe numbers —
+> needs the actual wing) and finish **§B** (B3 PWM bench); C4 live-on-the-wire
+> check at 115200/5 Hz and Spektrum status byte (H2) on the bench. SIL-wise:
+> J1b = sensor noise + gust time-series + ESC lag once D1/B3 land.

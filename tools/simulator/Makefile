@@ -137,12 +137,24 @@ test_obstacle_run: test_obstacle
 	./test_obstacle
 
 # Run all tests
-check: test_synthetic test_hover test_stage2_run test_stage34_run test_obstacle_run test_vo_run test_line_run test_adrc_run test_quad_run test_wing_run visual_sim
+check: test_synthetic test_hover test_stage2_run test_stage34_run test_obstacle_run test_vo_run test_line_run test_adrc_run test_quad_run test_wing_sil_run test_wing_run visual_sim
 	@echo "All tests passed"
 
 # ESP32 flying-wing host tests (esp32-airplane/ — see its firmware/Makefile)
 test_wing_run:
 	@$(MAKE) -C ../../esp32-airplane/firmware test
+
+# J1: 6-DOF wing SIL — plant + closed loop over firmware control.cpp (host-native)
+CXX ?= g++
+WING_FW_DIR = ../../esp32-airplane/firmware/esp32_airplane
+WING_SIL_SRC = test_wing_sil.cpp wing_plant.cpp $(WING_FW_DIR)/control.cpp $(WING_FW_DIR)/mixing.cpp
+WING_SIL_FLAGS = -std=gnu++17 -Wall -Wextra -O2 -I. -I$(WING_FW_DIR)
+
+test_wing_sil: $(WING_SIL_SRC) wing_plant.h
+	$(CXX) $(WING_SIL_FLAGS) -o $@ $(WING_SIL_SRC) -lm
+
+test_wing_sil_run: test_wing_sil
+	./test_wing_sil
 
 # Run quad sim visualizer
 run_quad: quad_sim_visual
@@ -155,8 +167,8 @@ run_quad_wind: quad_sim_visual
 	./quad_sim_visual --adrc --alt 2.0 --wind-x 2.0 --wind-y 1.0
 
 clean:
-	rm -f sim_main test_stage2 test_stage34 test_obstacle test_visual_odometry test_line_detect test_adrc test_quad_adrc visual_sim quad_sim_visual video_receiver \
-		sim_main.o test_stage2.o test_stage34.o test_obstacle.o test_visual_odometry.o test_line_detect.o test_adrc.o test_quad_adrc.o visual_sim.o quad_sim_visual.o video_receiver.o quad_sim.o \
+	rm -f sim_main test_stage2 test_stage34 test_obstacle test_visual_odometry test_line_detect test_adrc test_quad_adrc test_wing_sil wing_plant.o visual_sim quad_sim_visual video_receiver \
+		sim_main.o test_stage2.o test_stage34.o test_obstacle.o test_visual_odometry.o test_line_detect.o test_adrc.o test_quad_adrc.o test_wing_sil.o visual_sim.o quad_sim_visual.o video_receiver.o quad_sim.o \
 		../../src/vision/*.o ../../src/flight/*.o
 
-.PHONY: test_synthetic test_hover test_stage2_run test_stage34_run test_obstacle_run test_vo_run test_line_run test_adrc_run test_quad_run visual_sim run_visual run_rot check clean
+.PHONY: test_synthetic test_hover test_stage2_run test_stage34_run test_obstacle_run test_vo_run test_line_run test_adrc_run test_quad_run test_wing_sil_run visual_sim run_visual run_rot check clean

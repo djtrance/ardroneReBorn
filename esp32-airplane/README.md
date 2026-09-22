@@ -89,7 +89,7 @@ in the sketch folder); only one is active, and defining both or neither is a
 ```bash
 cd esp32-airplane/firmware && make test      # 257 assertions
 # or from the repo-wide suite:
-cd tools/simulator && make check             # quad (90) + wing (257)
+cd tools/simulator && make check             # quad (90) + wing (257) + wing SIL (64)
 ```
 
 ---

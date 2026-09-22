@@ -153,8 +153,10 @@
   #define AIRSPEED_WC           0.6f
   #define AIRSPEED_WO           2.0f
   // b0 at reference airspeed; scheduled b0 = B0_REF * q/q_ref, clamped
-  #define B0_ROLL_REF           9.0f      // TODO identify in SIL (F1)
-  #define B0_PITCH_REF          6.0f      // TODO identify in SIL
+  // (values identified against the J1 SIL plant at V_CRUISE; §A measured
+  //  airframe numbers will require re-running tools/simulator test_wing_sil)
+  #define B0_ROLL_REF           87.0f     // identified in SIL (J1): rad/s^2
+  #define B0_PITCH_REF          75.0f     // identified in SIL (J1): rad/s^2
   #define B0_MIN_SCALE          0.25f
   #define B0_MAX_SCALE          2.00f
 #endif
