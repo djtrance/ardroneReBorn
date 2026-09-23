@@ -34,6 +34,7 @@ MODULES = \
 	esp32_airplane/gps_nav.cpp \
 	esp32_airplane/guidance.cpp \
 	esp32_airplane/failsafe.cpp \
+	esp32_airplane/logger.cpp \
 	esp32_airplane/drivers/ld2450.cpp
 
 # Config + RC + sensor-translation modules (still Arduino-free)

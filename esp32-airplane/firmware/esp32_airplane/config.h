@@ -255,7 +255,8 @@
 #define PREFLIGHT_MAX_JITTER_US 200
 
 // ---------------------------------------------------------------------------
-// Logging (I3)
+// Logging (I3) — real-time CSV on USB serial + UDP (docs/test-campaign.md)
 // ---------------------------------------------------------------------------
 #define LOG_RATE_HZ             25
-#define LOG_RING_KB             256
+#define LOG_RING_KB             256      // planned onboard-flash ring (TODO)
+#define LOG_UDP_PORT            5005     // ground tool subscribes with a HELLO

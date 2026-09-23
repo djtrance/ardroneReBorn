@@ -71,6 +71,7 @@ void settings_defaults(Settings& s) {
     m.elevon_l_reverse  = 0;          // D1: validate on bench, flip if needed
     m.elevon_r_reverse  = 0;
     m.throttle_reverse  = 0;
+    m.passthrough       = 1;          // stage-1 default: pure RC -> elevon mix
     m.differential      = ELEVON_DIFFERENTIAL;
     m.esc_min_us        = ESC_MIN_US;
     m.esc_max_us        = ESC_MAX_US;
@@ -173,6 +174,7 @@ int settings_validate(Settings& s) {
     m.elevon_l_reverse = m.elevon_l_reverse ? 1 : 0;
     m.elevon_r_reverse = m.elevon_r_reverse ? 1 : 0;
     m.throttle_reverse = m.throttle_reverse ? 1 : 0;
+    m.passthrough      = m.passthrough ? 1 : 0;
     fixed += clamp_f(m.differential, 0.0f, 0.40f);
     fixed += clamp_u16(m.esc_min_us, 800, 1200);
     fixed += clamp_u16(m.esc_max_us, 1800, 2200);

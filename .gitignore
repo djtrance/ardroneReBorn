@@ -37,3 +37,4 @@ drivers/**/*.orig
 drivers/**/.tmp_versions/
 drivers/**/built-in.o
 esp32-airplane/firmware/build/
+__pycache__/

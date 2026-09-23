@@ -15,6 +15,7 @@ static MixSettings s_mix = {
     0,                          // elevon_l_reverse
     0,                          // elevon_r_reverse
     0,                          // throttle_reverse
+    1,                          // passthrough (etapa 1 default, same as NVS)
     ELEVON_DIFFERENTIAL,
     (uint16_t)ESC_MIN_US,
     (uint16_t)ESC_MAX_US,

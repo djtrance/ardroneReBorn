@@ -15,7 +15,7 @@
 #include <stddef.h>
 
 #define SETTINGS_MAGIC      0x57494E47u   // "WING"
-#define SETTINGS_VERSION    5u            // bump on any struct change
+#define SETTINGS_VERSION    6u            // bump on any struct change
 #define SETTINGS_BLOB_MAX   512
 
 #define SSID_MAX            32
@@ -37,6 +37,11 @@ struct MixSettings {
     uint8_t  elevon_l_reverse;        // 1 => invert that servo (D1)
     uint8_t  elevon_r_reverse;
     uint8_t  throttle_reverse;        // 1 => invert ESC signal (rare)
+    uint8_t  passthrough;             // 1 => etapa 1: RX sticks -> elevon mix
+                                      //      directly, no AHRS/control in the
+                                      //      loop (test-campaign T0). Default
+                                      //      ON: the first flights must behave
+                                      //      like a plain RC plane.
     float    differential;            // adverse-yaw differential 0..0.4 (D2)
     uint16_t esc_min_us;              // throttle low (D4 arming)
     uint16_t esc_max_us;

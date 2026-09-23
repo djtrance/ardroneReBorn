@@ -93,7 +93,9 @@ parrotFramework/
 │   └── auto-recovery-navigation.md  # motor-fail failsafe + nav + LD2450 radar
 ├── esp32-airplane/             # ESP32 flying-wing project (reuses AR.Drone algos)
 │   ├── CHECKLIST.md               # ★ iterative definition checklist
-│   └── docs/algorithm-mapping.md  # AR.Drone → wing algorithm transfer matrix
+│   ├── docs/algorithm-mapping.md  # AR.Drone → wing algorithm transfer matrix
+│   ├── docs/airframe-measurements.md  # §A sheet: measure the physical wing
+│   └── docs/test-campaign.md      # logger tutorial + T0..T3 test campaign
 ├── src/                       # C source code
 │   ├── main.c                 # standalone drone_encoder binary
 │   ├── dsp_init_main.c        # standalone DSP init utility
@@ -132,6 +134,9 @@ parrotFramework/
 │   ├── wfb-bridge/             # wifibroadcast transmitter
 │   │   ├── wfb_tx.c                # raw socket WiFi injection
 │   │   └── Makefile                # ARM cross-compile
+│   ├── wing_logger/              # wing live CSV logger ground tools
+│   │   ├── capture.py             # serial/UDP → CSV (rate/gap stats)
+│   │   └── plot.py                # 5-panel dashboard
 │   └── arduino-bridge/         # I2C/GPIO sensor bridge FW
 │       └── arduino_bridge.ino      # Arduino sketch (I2C+GPIO protocol)
 ├── build/                  # Makefiles, toolchain config

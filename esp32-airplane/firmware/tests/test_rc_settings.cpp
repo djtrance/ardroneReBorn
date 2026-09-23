@@ -14,6 +14,7 @@
 #include "mixing.h"
 #include "config.h"
 #include "gps_nav.h"
+#include "logger.h"
 #include "drivers/sensor_math.h"
 #include "drivers/sensors.h"
 
@@ -659,10 +660,100 @@ static void test_mixing_settings() {
 }
 
 // ===========================================================================
+// Stage-1 passthrough setting (etapa 1: RX -> elevon mix, test-campaign T0)
+// ===========================================================================
+static void test_settings_passthrough() {
+    printf("[settings passthrough]\n");
+
+    Settings s;
+    settings_defaults(s);
+    ck(s.mix.passthrough == 1, "default passthrough ON (stage-1 safe)");
+    ck(settings_validate(s) == 0, "defaults validate clean");
+
+    s.mix.passthrough = 7;
+    ck(settings_validate(s) == 0, "passthrough normalises without 'fixed' count");
+    ck(s.mix.passthrough == 1, "any non-zero becomes 1");
+
+    s.mix.passthrough = 0;
+    ck(settings_validate(s) == 0 && s.mix.passthrough == 0, "0 survives validate");
+
+    // Round trip through the blob (this is what NVS stores).
+    uint8_t buf[SETTINGS_BLOB_MAX];
+    size_t len = 0;
+    ck(settings_serialize(s, buf, sizeof(buf), &len), "serialize with passthrough=0");
+    Settings back;
+    settings_defaults(back);
+    ck(settings_deserialize(buf, len, back), "deserialize");
+    ck(back.mix.passthrough == 0, "passthrough survives the blob round trip");
+}
+
+// ===========================================================================
+// Real-time CSV logger formatter (I3) — the on-wire schema is a contract
+// with tools/wing_logger/*.py, so column count and spot formats are pinned.
+// ===========================================================================
+static int count_char(const char* t, char c) {
+    int n = 0;
+    for (const char* p = t; *p; p++) if (*p == c) n++;
+    return n;
+}
+
+static void test_logger_csv() {
+    printf("[logger csv]\n");
+
+    LogSample s;
+    memset(&s, 0, sizeof(s));
+
+    char line[LOGGER_MAX_LINE];
+    size_t n = logger_format(line, sizeof(line), s);
+    ck(n > 0, "formats a zeroed sample");
+    ck(line[n] == 0, "NUL terminated");
+    ck(strchr(line, '\n') != nullptr, "line ends with newline");
+    ck(count_char(line, ',') == count_char(logger_csv_header(), ','),
+       "data columns match header columns");
+    ck(strncmp(line, "0,0,0,0,0,0,0,0,", 16) == 0, "integer preamble spot check");
+
+    // A fully-populated sample: pin the exact formats used per column group.
+    s.t_ms = 123456; s.mode = 1; s.armed = 1; s.rc_ok = 1;
+    s.phase = 2; s.fs_evt = 7; s.env = 0x05; s.wind = 3;
+    s.rc_p = -1.0f; s.rc_r = 0.5f; s.rc_t = 0.25f; s.rc_y = 0.125f;
+    s.raw_p = 172; s.raw_r = 992; s.raw_t = 1811; s.raw_y = 512;
+    s.ax = 1.0f; s.ay = -0.5f; s.az = 0.25f;
+    s.gx = 0.001f; s.gy = -0.002f; s.gz = 0.003f;
+    s.baro_pa = 101325.0f; s.baro_c = 21.5f;
+    s.roll = 12.34f; s.pitch = -5.67f; s.yaw = 180.0f;
+    s.fix = 1; s.sv = 11; s.hdop = 0.9f;
+    s.gps_v = 15.2f; s.gps_alt = 123.4f; s.gps_trk = 270.0f; s.vest = 15.0f;
+    s.phi_cmd = 0.5f; s.l_us = 1520; s.r_us = 1480;
+    s.thr_out = 0.75f; s.overruns = 9;
+
+    n = logger_format(line, sizeof(line), s);
+    ck(n > 0, "formats a populated sample");
+    ck(strncmp(line, "123456,1,1,1,2,7,5,3,", 21) == 0,
+       "preamble: t,mode,armed,rc_ok,phase,fs,env,wind");
+    ck(strstr(line, ",-1.000,0.500,0.250,0.125,172,992,1811,512,") != nullptr,
+       "sticks (%.3f) + raw channel units (%u)");
+    ck(strstr(line, ",101325.0,21.50,") != nullptr,
+       "baro: %.1f Pa, %.2f C");
+    ck(strstr(line, ",180.00,") != nullptr, "attitude in %.2f deg");
+    ck(strstr(line, ",0.5000,1520,1480,0.750,9\n") != nullptr,
+       "phi_cmd %.4f, surfaces %u/%u, throttle %.3f, overruns %lu");
+
+    // Non-finite must still produce a parseable field, never an empty column.
+    s.gps_v = nanf("");
+    n = logger_format(line, sizeof(line), s);
+    ck(n > 0 && strstr(line, "nan") != nullptr, "NaN renders as a 'nan' field");
+
+    char tiny[8];
+    ck(logger_format(tiny, sizeof(tiny), s) == 0, "undersized buffer rejected");
+    ck(logger_format(nullptr, 64, s) == 0, "null buffer rejected");
+}
+
+// ===========================================================================
 int main() {
     printf("=== esp32-airplane config/RC/sensor tests ===\n");
     test_settings_codec();
     test_settings_validate();
+    test_settings_passthrough();
     test_settings_proto_defaults();
     test_sbus_decode();
     test_spektrum_decode();
@@ -670,6 +761,7 @@ int main() {
     test_sensor_math();
     test_gps_ublox6();
     test_mixing_settings();
+    test_logger_csv();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

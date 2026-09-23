@@ -98,6 +98,7 @@ static int apply_body(const char* b, Settings& s) {
     m.elevon_l_reverse = f_chk(b, "l_rev") ? 1 : 0;
     m.elevon_r_reverse = f_chk(b, "r_rev") ? 1 : 0;
     m.throttle_reverse = f_chk(b, "t_rev") ? 1 : 0;
+    m.passthrough      = f_chk(b, "pt") ? 1 : 0;
     m.differential     = (float)f_dbl(b, "diff",  m.differential);
     m.esc_min_us       = (uint16_t)f_long(b, "esc_min", m.esc_min_us);
     m.esc_max_us       = (uint16_t)f_long(b, "esc_max", m.esc_max_us);
@@ -155,7 +156,7 @@ static void handle_json() {
     char buf[1024];
     snprintf(buf, sizeof(buf),
         "{\"mix\":{\"ml_trim\":%u,\"mr_trim\":%u,\"p_span\":%u,\"r_span\":%u,"
-        "\"l_rev\":%u,\"r_rev\":%u,\"t_rev\":%u,\"diff\":%.3f,"
+        "\"l_rev\":%u,\"r_rev\":%u,\"t_rev\":%u,\"pt\":%u,\"diff\":%.3f,"
         "\"esc_min\":%u,\"esc_max\":%u,\"esc_idle\":%u},"
         "\"rc\":{\"proto\":%u,\"ch_p\":%u,\"ch_r\":%u,\"ch_t\":%u,\"ch_y\":%u,"
         "\"ch_arm\":%u,\"ch_rth\":%u,\"ch_fm\":%u,\"arm_high\":%u,"
@@ -167,6 +168,7 @@ static void handle_json() {
         s.mix.elevon_l_trim_us, s.mix.elevon_r_trim_us,
         s.mix.pitch_span_us, s.mix.roll_span_us,
         s.mix.elevon_l_reverse, s.mix.elevon_r_reverse, s.mix.throttle_reverse,
+        s.mix.passthrough,
         (double)s.mix.differential,
         s.mix.esc_min_us, s.mix.esc_max_us, s.mix.esc_idle_us,
         s.rc.proto, s.rc.ch_pitch, s.rc.ch_roll, s.rc.ch_throttle, s.rc.ch_yaw,
@@ -313,6 +315,7 @@ small{color:#7b8ea5}
 <div class=chk><input name=l_rev id=l_rev type=checkbox><label for=l_rev>Invertir elevon L</label></div>
 <div class=chk><input name=r_rev id=r_rev type=checkbox><label for=r_rev>Invertir elevon R</label></div>
 <div class=chk><input name=t_rev id=t_rev type=checkbox><label for=t_rev>Invertir acelerador</label></div>
+<div class=chk><input name=pt id=pt type=checkbox><label for=pt>Passthrough etapa 1 (RX &rarr; mezcla directa)</label></div>
 </div></section>
 
 <section><h2>RC entrada (H2)</h2><div class=grid>
@@ -365,6 +368,7 @@ async function fill(){const r=await (await fetch('/api/settings')).json();
  set('ml_trim',r.mix.ml_trim);set('mr_trim',r.mix.mr_trim);
  set('p_span',r.mix.p_span);set('r_span',r.mix.r_span);
  set('l_rev',r.mix.l_rev);set('r_rev',r.mix.r_rev);set('t_rev',r.mix.t_rev);
+ set('pt',r.mix.pt);
  set('diff',r.mix.diff);set('expo',r.rc.expo);
  set('proto',r.rc.proto);set('ch_p',r.rc.ch_p);set('ch_r',r.rc.ch_r);
  set('ch_t',r.rc.ch_t);set('ch_y',r.rc.ch_y);set('ch_arm',r.rc.ch_arm);

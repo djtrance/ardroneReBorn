@@ -38,7 +38,9 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 | Geofence circle + altitude (G5) | ✅ implemented (independent layer) |
 | Failsafe FSM + preflight gate (H1/H6) | ✅ states + thresholds defined |
 | `config.h` parameter layer (E5) | ✅ all gains/limits centralized |
-| Host unit tests (J2 / E6) | ✅ **321 assertions**: 257 firmware (111 core + 146 config/RC/sensor) + **64 wing-SIL (J1)** |
+| Host unit tests (J2 / E6) | ✅ **343 assertions**: 279 firmware (111 core + 168 config/RC/sensor) + **64 wing-SIL (J1)** |
+| Real-time CSV logger + ground tools (I3/I2) | ✅ 39-column CSV @25 Hz on USB + UDP:5005, host-tested formatter, `tools/wing_logger/{capture,plot}.py` |
+| Etapa-1 passthrough mode (T0) | ✅ RX→elevon mix direct, **default ON**, portal checkbox, persisted in NVS |
 | LD2450 frame parser + track matcher (C7) | ✅ real parser — **verify offsets vs firmware** |
 | GPS driver: u-blox 6 UART1 + NMEA/UBX (C4) | ✅ real driver — GGA/RMC @ 4 Hz, byte-stream parser + UBX config, tested |
 | Pin map (B2) | ✅ written into `config.h` — **still needs bench verification** |
@@ -49,10 +51,11 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 | Telemetry research (I1) | 📄 `docs/rc-and-telemetry.md` — options A–E ranked |
 
 **Still open / blocking**:
-- **§A airframe numbers** (A3 CG, A6 `V_stall`) — *physical blocker, needs the wing*
+- **§A airframe numbers** (A3 CG, A6 `V_stall`) — *physical blocker, needs the wing* — **step-by-step procedure ready: `docs/airframe-measurements.md`**
 - Real **LiDAR (C6) driver** is a stub — must land before §C closes
 - Battery ADC (B4/H3) — hardcoded placeholder
 - **Spektrum byte-2 status layout** — two sources disagree, bench-validate against a real receiver
+- **Wind classifier (F6)** — designed in `docs/test-campaign.md` §5 (`wind` column already in the CSV schema); implement + tune after the first T1/T2 logs
 
 ---
 
@@ -437,11 +440,22 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
   - [ ] GPS lat/lon/fix/HDOP, battery V/A, throttle %
   - [ ] control outputs (elevons), `f̂` (ESO disturbance estimate), envelope flags
   - [ ] failsafe state, loop jitter, task watchdog status
+  > **All of these already flow in the real-time CSV logger** (except `f̂` and
+  > battery — B4). I2 only remains as the *subset to publish over S.Port/FPort*
+  > once I1 picks the protocol. See `docs/test-campaign.md` §1 for the schema.
 - [ ] **I3. Onboard flight log ("blackbox")**
-  - [ ] Ring buffer in flash, size ____ KB, rate ____ Hz: [ ]
+  - [x] **Real-time stream landed**: 39-column CSV @ `LOG_RATE_HZ` (25 Hz) over
+        USB serial **and** UDP `:5005` (HELLO-subscribed), formatter host-tested
+        in `logger.cpp`; tools: `tools/wing_logger/capture.py` + `plot.py`
+        (5 panels) — `docs/test-campaign.md` §1
+  - [ ] Ring buffer in flash, size ____ KB, rate ____ Hz: [ ] (`LOG_RING_KB = 256`
+        defined, not wired — for flights without a PC in range)
   - [ ] Logged: IMU, fused attitude, setpoints, outputs, `f̂`, nav, failsafe: [ ]
-  - [ ] Download over serial/WiFi after flight: [ ]
-  - [ ] Post-flight CSV/plots tool: [ ]
+        (everything but `f̂`/battery is in the CSV)
+  - [ ] Download over serial/WiFi after flight: [ ] (live stream works today;
+        after-flight download needs the flash ring above)
+  - [x] Post-flight CSV/plots tool: `tools/wing_logger/plot.py` (panels: sticks,
+        surfaces, attitude+env, speeds+alt, IMU signature)
 - [ ] **I4. GCS**
   - [ ] [ ] Mission Planner · [ ] QGroundControl · [ ] custom web dashboard
   - [ ] Live map + track + geofence display: [ ]
@@ -554,9 +568,14 @@ Collecting items we don't want to lose but aren't blocking yet:
 | 2026-09-22 | C4 | Rate bumped 4 → **5 Hz** (`GPS_RATE_MS` 200 ms) = the **NEO-6 datasheet maximum** (GPS.G6-HW-09005 "Maximum Navigation update rate: 5 Hz"; u-blox support: faster ⇒ packet loss + abend/reset). **10 Hz rejected as out-of-spec for this hardware** — needs NEO-M8N (10 Hz) + CFG-PRT→115200. Bandwidth at 5 Hz: 725/960 B/s @9600. **252 tests** (111 + 141) |
 | 2026-09-22 | C4 | **Line rate raised 9600 → 115200** via UBX-CFG-PRT with a **probe handshake**: config pushed at 9600 → probe for NMEA → not found? probe 115200 (retained-config modules) → CFG-PRT jump → **probe-verify on the new baud, revert with re-probe on failure** (GPS never left mute). Fix latency 151 → 13 ms/sentence; init log shows `gps=1@115200`. **257 tests** (111 + 146) |
 | 2026-09-22 | **J1** | **6-DOF wing SIL landed** (`tools/simulator/wing_plant.{h,cpp}` + `test_wing_sil`, **64 assertions**, in `make check`): RK4 body-axes plant (ω×v, gravity force-only), exact level-flight trim (`L=W−T·sinα`; `Cm0` = CG at V_CRUISE), stall break (linear→flat-plate), steady-wind input, control signs = controller intent. **b0 identified: roll 87.3 / pitch 75.2 rad/s² @15 m/s → written to config (`B0_ROLL_REF` 9→87, `B0_PITCH_REF` 6→75)** — old values were ~10× low (ADRC output would have saturated against the real plant). Closed-loop over the actual `control.cpp`: level hold, roll-step tracking + return, bank clamp @50°, **stall override beats a full nose-up stick and clears on recovery**, V_NE flag, surface slew ≤0.01745/step, airspeed PI, 4 s random-stick fuzz. **64 SIL + 257 firmware green** (both IMUs) |
+| 2026-09-23 | **I3 / etapa 1** | **Real-time CSV logger + passthrough mode + campaign docs**: `logger.{h,cpp}` — 39-column CSV @25 Hz, formatter **host-tested** (schema pinned vs `tools/wing_logger/*.py`), sinks = USB serial + UDP `:5005` (HELLO subscription); tools `capture.py` (serial/UDP → CSV, rate/gap stats) + `plot.py` (5 panels), smoke-tested end-to-end from the real C formatter. **Passthrough (etapa 1)**: `mix.passthrough` default **ON** — RX sticks → `mix_elevons` directly (no AHRS/control/envelope/RTH in the loop), portal checkbox + NVS; RTH triggers guarded off. Docs: **`docs/airframe-measurements.md`** (§A sheet: mass/CG/span/inertia pendulum/δmax/thrust curve with formulas + sign-off) and **`docs/test-campaign.md`** (logger tutorial, T0 bench with D1 direction table, T1 glide, T2 GPS stall campaign with wind-triangle + event detector, T3 IMU+baro wind classifier design with thresholds; 8 Mermaid diagrams). **279 firmware tests** (111 + 168), both IMUs |
 
-> **Next iteration target**: **J1 done** (b0 identified, F1/F2/F3 closed-loop
-> green). Next: **C6 LiDAR** (last §C stub) + close **§A** (airframe numbers —
-> needs the actual wing) and finish **§B** (B3 PWM bench); C4 live-on-the-wire
-> check at 115200/5 Hz and Spektrum status byte (H2) on the bench. SIL-wise:
-> J1b = sensor noise + gust time-series + ESC lag once D1/B3 land.
+> **Next iteration target**: **I3 real-time logger + etapa-1 passthrough done**
+> (279 firmware tests). Next: **C6 LiDAR** (last §C stub) + **F6 wind
+> classifier** (design ready in `docs/test-campaign.md` §5 — code it pure and
+> host-test it against synthetic log rows) + **§B/B3 bench** with the T0
+> checklist (`docs/test-campaign.md` §2). When the wing arrives: run the §A
+> sheet (`docs/airframe-measurements.md`) → re-ID `b0` → T1/T2 for `V_stall`.
+> C4 live-on-the-wire check at 115200/5 Hz and Spektrum status byte (H2) on
+> the bench. SIL-wise: J1b = sensor noise + gust time-series + ESC lag once
+> D1/B3 land.

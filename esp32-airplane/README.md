@@ -11,7 +11,13 @@ algorithms developed for the AR.Drone 2.0 project.
 > 3. [`docs/rc-and-telemetry.md`](docs/rc-and-telemetry.md) — how RC input and
 >    telemetry reach a **Radiomaster TX16S MKII (4in1)** (SBUS/Spektrum in,
 >    S.Port/FPort out — SBUS itself is strictly one-way)
-> 4. `firmware/esp32_airplane/` — starter firmware
+> 4. [`docs/test-campaign.md`](docs/test-campaign.md) — **real-time logger +
+>    graphical test campaign**: T0 bench (RX→2-servo mix), T1 glide, T2 GPS
+>    stall run, T3 IMU+baro wind classifier
+> 5. [`docs/airframe-measurements.md`](docs/airframe-measurements.md) — the
+>    step-by-step **§A sheet** to measure the physical wing (mass, CG,
+>    inertia, thrust curve, sign conventions)
+> 6. `firmware/esp32_airplane/` — starter firmware
 
 ---
 
@@ -38,13 +44,15 @@ esp32-airplane/
 ├── CHECKLIST.md                  # ★ iterative definition checklist
 ├── docs/
 │   ├── algorithm-mapping.md      # AR.Drone → wing algorithm transfer matrix
-│   └── rc-and-telemetry.md       # RC in (SBUS/Spektrum) + telemetry out (TX16S)
+│   ├── rc-and-telemetry.md       # RC in (SBUS/Spektrum) + telemetry out (TX16S)
+│   ├── airframe-measurements.md  # ★ §A sheet: measure the physical wing (formulas)
+│   └── test-campaign.md          # ★ logger tutorial + T0..T3 test campaign
 └── firmware/
-    ├── Makefile                  # `make test` → 257 host unit tests
+    ├── Makefile                  # `make test` → 279 host unit tests
     │                             # `make test IMU=87` → GY-87 board instead
     ├── tests/
     │   ├── test_wing_core.cpp    # J2: mixing, envelope, L1, RTH, NMEA, LD2450, AHRS, failsafe (111)
-    │   └── test_rc_settings.cpp  # settings/CRC, SBUS+Spektrum, sensor math (106)
+    │   └── test_rc_settings.cpp  # settings/CRC, SBUS+Spektrum, sensor math, logger CSV (168)
     └── esp32_airplane/
         ├── esp32_airplane.ino    # entry point: setup/loop, fixed-rate slots, PWM, RC
         ├── config.h              # gains, limits, pin map, compile-time IMU select
@@ -57,6 +65,7 @@ esp32-airplane/
         ├── guidance.{h,cpp}      # L1 path following, wing-specific RTH, geofence
         ├── gps_nav.{h,cpp}       # NMEA parser + Haversine (ported from AR.Drone)
         ├── failsafe.{h,cpp}      # failsafe FSM + preflight gate
+        ├── logger.{h,cpp}        # real-time CSV log (I3): 39 cols @25 Hz, USB+UDP
         └── drivers/
             ├── imu_board.h       # board abstraction behind `#if IMU_GY91/GY87`
             ├── imu_gy91.cpp      # REAL: MPU9250 + AK8963 + BMP280
@@ -87,10 +96,21 @@ in the sketch folder); only one is active, and defining both or neither is a
 ### Run the tests
 
 ```bash
-cd esp32-airplane/firmware && make test      # 257 assertions
+cd esp32-airplane/firmware && make test      # 279 assertions
 # or from the repo-wide suite:
-cd tools/simulator && make check             # quad (90) + wing (257) + wing SIL (64)
+cd tools/simulator && make check             # quad (90) + wing (279) + wing SIL (64)
 ```
+
+### Real-time log (checklist I3)
+
+```bash
+# capture the 39-column CSV (USB or UDP) and plot the 5 panels:
+python3 ../../tools/wing_logger/capture.py --port /dev/tty.usbserial-0001 -o run.csv
+python3 ../../tools/wing_logger/plot.py run.csv --out run.png
+```
+
+Full workflow (bench T0 → stall T2 → wind classifier): see
+[`docs/test-campaign.md`](docs/test-campaign.md).
 
 ---
 
