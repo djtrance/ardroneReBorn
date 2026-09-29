@@ -135,6 +135,15 @@ static int apply_body(const char* b, Settings& s) {
     t.fast_only = f_chk(b, "t_fast") ? 1 : 0;
     t.rate_hz   = (uint16_t)f_long(b, "t_rate", t.rate_hz);
 
+    MavlinkSettings& mv = s.mav;
+    mv.enable  = f_chk(b, "mv_en") ? 1 : 0;
+    mv.uart    = (uint8_t)f_long(b, "mv_uart", mv.uart);
+    mv.baud    = (uint32_t)f_long(b, "mv_baud", (long)mv.baud);
+    mv.rate_hz = (uint8_t)f_long(b, "mv_rate", mv.rate_hz);
+    mv.sysid   = (uint8_t)f_long(b, "mv_sys",  mv.sysid);
+    mv.tx_pin  = (int16_t)f_long(b, "mv_tx",   mv.tx_pin);
+    mv.rx_pin  = (int16_t)f_long(b, "mv_rx",   mv.rx_pin);
+
     return settings_validate(s);
 }
 
@@ -153,7 +162,7 @@ static void handle_index() {
 
 static void handle_json() {
     const Settings& s = *s_cfg;
-    char buf[1024];
+    char buf[1536];
     snprintf(buf, sizeof(buf),
         "{\"mix\":{\"ml_trim\":%u,\"mr_trim\":%u,\"p_span\":%u,\"r_span\":%u,"
         "\"l_rev\":%u,\"r_rev\":%u,\"t_rev\":%u,\"pt\":%u,\"diff\":%.3f,"
@@ -164,6 +173,8 @@ static void handle_json() {
         "\"wifi\":{\"ssid\":\"%s\",\"wmode\":%u,\"hostname\":\"%s\","
         "\"hport\":%u},"
         "\"telem\":{\"enable\":%u,\"fast_only\":%u,\"rate_hz\":%u},"
+        "\"mav\":{\"enable\":%u,\"uart\":%u,\"baud\":%lu,\"rate\":%u,"
+        "\"sysid\":%u,\"tx\":%d,\"rx\":%d},"
         "\"board\":\"%s\"}",
         s.mix.elevon_l_trim_us, s.mix.elevon_r_trim_us,
         s.mix.pitch_span_us, s.mix.roll_span_us,
@@ -177,6 +188,8 @@ static void handle_json() {
         s.rc.deadband_raw, s.rc.loss_timeout_ms, (double)s.rc.expo,
         s.wifi.ssid, s.wifi.mode, s.wifi.hostname, s.wifi.http_port,
         s.telem.enable, s.telem.fast_only, s.telem.rate_hz,
+        s.mav.enable, s.mav.uart, (unsigned long)s.mav.baud, s.mav.rate_hz,
+        s.mav.sysid, s.mav.tx_pin, s.mav.rx_pin,
         IMU_BOARD_NAME);
     send_text(200, "application/json", String(buf));
 }
@@ -354,6 +367,25 @@ small{color:#7b8ea5}
 </div><small>Solo funciona con receptor FrSky (S.Port/FPort) &mdash; ver
 docs/rc-and-telemetry.md</small></section>
 
+<section><h2>Telemetría MAVLink (I1)</h2><div class=grid>
+<div><label>Puerto UART</label><select name=mv_uart>
+<option value=0>0 &mdash; USB (CSV serial a UDP)</option>
+<option value=1>1 &mdash; GPS (roba GPS)</option>
+<option value=2>2 &mdash; RC (roba receptor)</option></select></div>
+<div><label>Baudios</label><select name=mv_baud>
+<option value=9600>9600</option><option value=57600>57600</option>
+<option value=115200>115200</option><option value=230400>230400</option>
+<option value=460800>460800</option><option value=921600>921600</option>
+</select></div>
+<div><label>Rate rapido (Hz)</label><input name=mv_rate type=number min=1 max=25></div>
+<div><label>System ID</label><input name=mv_sys type=number min=1 max=255></div>
+<div><label>TX pin (-1=def)</label><input name=mv_tx type=number min=-1 max=39></div>
+<div><label>RX pin (-1=def)</label><input name=mv_rx type=number min=-1 max=39></div>
+<div class=chk><input name=mv_en id=mv_en type=checkbox><label for=mv_en>Activar MAVLink</label></div>
+</div><small>UART 1/2 exigen TX+RX pin y desactivan GPS/RC. Con MAVLink en
+UART0 el CSV serial se apaga (use capture.py --udp). Ver
+docs/mavlink-telemetry.md</small></section>
+
 <button type=submit>GUARDAR</button>
 <div id=msg></div>
 </form>
@@ -379,6 +411,9 @@ async function fill(){const r=await (await fetch('/api/settings')).json();
  set('hport',r.wifi.hport);set('wmode',r.wifi.wmode);
  set('t_en',r.telem.enable);set('t_fast',r.telem.fast_only);
  set('t_rate',r.telem.rate_hz);
+ set('mv_en',r.mav.enable);set('mv_uart',r.mav.uart);set('mv_baud',r.mav.baud);
+ set('mv_rate',r.mav.rate);set('mv_sys',r.mav.sysid);
+ set('mv_tx',r.mav.tx);set('mv_rx',r.mav.rx);
  msg.textContent='Placa: '+r.board;}
 f.onsubmit=async e=>{e.preventDefault();
  const p=new URLSearchParams(new FormData(f));

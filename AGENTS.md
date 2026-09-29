@@ -95,7 +95,8 @@ parrotFramework/
 │   ├── CHECKLIST.md               # ★ iterative definition checklist
 │   ├── docs/algorithm-mapping.md  # AR.Drone → wing algorithm transfer matrix
 │   ├── docs/airframe-measurements.md  # §A sheet: measure the physical wing
-│   └── docs/test-campaign.md      # logger tutorial + T0..T3 test campaign
+│   ├── docs/test-campaign.md      # logger tutorial + T0..T3 test campaign
+│   └── docs/mavlink-telemetry.md  # MAVLink 2.0 GCS link on a configurable UART
 ├── src/                       # C source code
 │   ├── main.c                 # standalone drone_encoder binary
 │   ├── dsp_init_main.c        # standalone DSP init utility

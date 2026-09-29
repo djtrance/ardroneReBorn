@@ -308,7 +308,7 @@ flowchart LR
     E --> G["fijar V_MIN = 1.3·V_stall,<br/>V_NE, PHI_MAX con datos T2"]
 ```
 
-1. `cd esp32-airplane/firmware && make test` (279) — el esquema de settings
+1. `cd esp32-airplane/firmware && make test` (350) — el esquema de settings
    y logger no debe romperse.
 2. `cd tools/simulator && make check` — el SIL usa los números nuevos; si
    `b0` identificado se desvía >15 % de `B0_*_REF`, **actualizar el config**

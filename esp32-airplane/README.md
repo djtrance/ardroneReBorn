@@ -17,7 +17,9 @@ algorithms developed for the AR.Drone 2.0 project.
 > 5. [`docs/airframe-measurements.md`](docs/airframe-measurements.md) — the
 >    step-by-step **§A sheet** to measure the physical wing (mass, CG,
 >    inertia, thrust curve, sign conventions)
-> 6. `firmware/esp32_airplane/` — starter firmware
+> 6. [`docs/mavlink-telemetry.md`](docs/mavlink-telemetry.md) — **MAVLink 2.0
+>    GCS link** on a configurable UART (QGC live view; golden-tested encoder)
+> 7. `firmware/esp32_airplane/` — starter firmware
 
 ---
 
@@ -46,13 +48,15 @@ esp32-airplane/
 │   ├── algorithm-mapping.md      # AR.Drone → wing algorithm transfer matrix
 │   ├── rc-and-telemetry.md       # RC in (SBUS/Spektrum) + telemetry out (TX16S)
 │   ├── airframe-measurements.md  # ★ §A sheet: measure the physical wing (formulas)
-│   └── test-campaign.md          # ★ logger tutorial + T0..T3 test campaign
+│   ├── test-campaign.md          # ★ logger tutorial + T0..T3 test campaign
+│   └── mavlink-telemetry.md      # MAVLink 2.0 GCS link on a configurable UART
 └── firmware/
-    ├── Makefile                  # `make test` → 279 host unit tests
+    ├── Makefile                  # `make test` → 350 host unit tests
     │                             # `make test IMU=87` → GY-87 board instead
     ├── tests/
     │   ├── test_wing_core.cpp    # J2: mixing, envelope, L1, RTH, NMEA, LD2450, AHRS, failsafe (111)
-    │   └── test_rc_settings.cpp  # settings/CRC, SBUS+Spektrum, sensor math, logger CSV (168)
+    │   ├── test_rc_settings.cpp  # settings/CRC, SBUS+Spektrum, sensor math, logger CSV (186)
+    │   └── test_mavlink.cpp      # MAVLink frames vs pymavlink goldens + RX + scheduler (53)
     └── esp32_airplane/
         ├── esp32_airplane.ino    # entry point: setup/loop, fixed-rate slots, PWM, RC
         ├── config.h              # gains, limits, pin map, compile-time IMU select
@@ -66,17 +70,18 @@ esp32-airplane/
         ├── gps_nav.{h,cpp}       # NMEA parser + Haversine (ported from AR.Drone)
         ├── failsafe.{h,cpp}      # failsafe FSM + preflight gate
         ├── logger.{h,cpp}        # real-time CSV log (I3): 39 cols @25 Hz, USB+UDP
+        ├── mavlink.{h,cpp}       # MAVLink 2.0 GCS telemetry (I1): encode + RX
         └── drivers/
             ├── imu_board.h       # board abstraction behind `#if IMU_GY91/GY87`
             ├── imu_gy91.cpp      # REAL: MPU9250 + AK8963 + BMP280
             ├── imu_gy87.cpp      # REAL: MPU6050 + HMC5883L + BMP180
             ├── sensor_math.{h,cpp} # LSB tables + BMP180/BMP280 datasheet compensation
             ├── imu.{h,cpp}       # thin adapter over board_imu_*
-            ├── sensors.{h,cpp}   # baro/mag dispatch; GPS/TFmini still STUBs (C4/C6)
+            ├── sensors.{h,cpp}   # baro/mag dispatch + REAL GPS (C4); TFmini still STUB (C6)
             └── ld2450.{h,cpp}    # REAL: HLK-LD2450 frame parser + track matcher (C7)
 ```
 
-*GPS (C4) and LiDAR (C6) still emit synthetic signals. Wire real drivers
+*LiDAR (C6) still emits a synthetic signal. Wire the real TFmini driver
 before §C of the checklist is marked done.*
 
 ### Compile-time IMU selection
@@ -96,9 +101,9 @@ in the sketch folder); only one is active, and defining both or neither is a
 ### Run the tests
 
 ```bash
-cd esp32-airplane/firmware && make test      # 279 assertions
+cd esp32-airplane/firmware && make test      # 350 assertions
 # or from the repo-wide suite:
-cd tools/simulator && make check             # quad (90) + wing (279) + wing SIL (64)
+cd tools/simulator && make check             # quad (90) + wing (350) + wing SIL (64)
 ```
 
 ### Real-time log (checklist I3)
@@ -111,6 +116,18 @@ python3 ../../tools/wing_logger/plot.py run.csv --out run.png
 
 Full workflow (bench T0 → stall T2 → wind classifier): see
 [`docs/test-campaign.md`](docs/test-campaign.md).
+
+### MAVLink to a ground station (checklist I1)
+
+```bash
+# portal: mv_en=1, mv_uart=0 (USB), mv_baud=57600 → then in QGroundControl:
+# Application Settings → Comm Links → Serial @ that baud.
+# CSV serial moves to UDP while MAVLink owns UART0, so keep capture on:
+python3 ../../tools/wing_logger/capture.py --udp 192.168.4.1:5005 -o run.csv
+```
+
+Frame format, message table, UART conflicts (UART1 kills GPS, UART2 kills
+RC): [`docs/mavlink-telemetry.md`](docs/mavlink-telemetry.md).
 
 ---
 

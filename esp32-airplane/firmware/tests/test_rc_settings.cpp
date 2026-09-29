@@ -688,6 +688,71 @@ static void test_settings_passthrough() {
 }
 
 // ===========================================================================
+// MAVLink telemetry settings (I1) — port/baud/rate are pilot-visible, so the
+// clamps matter: a bad portal POST must never produce an unstreamable link.
+// ===========================================================================
+static void test_settings_mavlink() {
+    printf("[settings mavlink]\n");
+
+    Settings s;
+    settings_defaults(s);
+    ck(s.mav.enable == 0, "default MAVLink OFF (CSV logger owns UART0)");
+    ck(s.mav.uart == 0, "default UART0 (USB)");
+    ck(s.mav.rate_hz == 10, "default fast rate 10 Hz");
+    ck(s.mav.baud == 57600, "default baud 57600");
+    ck(s.mav.sysid == 1, "default sysid 1");
+    ck(s.mav.tx_pin == -1 && s.mav.rx_pin == -1, "default pins unset (-1)");
+    ck(settings_validate(s) == 0, "defaults validate clean");
+
+    s.mav.enable = 7;
+    s.mav.uart = 5;
+    ck(settings_validate(s) > 0, "bad uart counts as fixed");
+    ck(s.mav.enable == 1 && s.mav.uart == 0, "enable -> 1, uart -> 0");
+
+    s.mav.rate_hz = 0;
+    settings_validate(s);
+    ck(s.mav.rate_hz == 10, "rate 0 falls back to 10 Hz");
+    s.mav.rate_hz = 99;
+    settings_validate(s);
+    ck(s.mav.rate_hz == 25, "rate 99 clamps to 25 (== LOG_RATE_HZ)");
+
+    s.mav.sysid = 0;
+    settings_validate(s);
+    ck(s.mav.sysid == 1, "sysid 0 is invalid -> 1");
+
+    s.mav.baud = 100;
+    settings_validate(s);
+    ck(s.mav.baud == 57600, "absurd low baud -> 57600");
+    s.mav.baud = 10000000;
+    settings_validate(s);
+    ck(s.mav.baud == 921600, "absurd high baud -> 921600");
+
+    s.mav.tx_pin = 50;
+    s.mav.rx_pin = -7;
+    settings_validate(s);
+    ck(s.mav.tx_pin == -1 && s.mav.rx_pin == -1, "bad pins -> -1 (default)");
+
+    // Round trip through the blob.
+    s.mav.enable = 1;
+    s.mav.uart = 2;
+    s.mav.rate_hz = 25;
+    s.mav.baud = 115200;
+    s.mav.sysid = 42;
+    s.mav.tx_pin = 33;
+    s.mav.rx_pin = 32;
+    uint8_t buf[SETTINGS_BLOB_MAX];
+    size_t len = 0;
+    ck(settings_serialize(s, buf, sizeof(buf), &len), "serialize with mavlink on");
+    Settings back;
+    settings_defaults(back);
+    ck(settings_deserialize(buf, len, back), "deserialize");
+    ck(back.mav.enable == 1 && back.mav.uart == 2 && back.mav.rate_hz == 25 &&
+       back.mav.baud == 115200 && back.mav.sysid == 42 &&
+       back.mav.tx_pin == 33 && back.mav.rx_pin == 32,
+       "all MAVLink fields survive the blob round trip");
+}
+
+// ===========================================================================
 // Real-time CSV logger formatter (I3) — the on-wire schema is a contract
 // with tools/wing_logger/*.py, so column count and spot formats are pinned.
 // ===========================================================================
@@ -754,6 +819,7 @@ int main() {
     test_settings_codec();
     test_settings_validate();
     test_settings_passthrough();
+    test_settings_mavlink();
     test_settings_proto_defaults();
     test_sbus_decode();
     test_spektrum_decode();

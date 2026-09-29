@@ -42,6 +42,7 @@ HW_MODULES = \
 	esp32_airplane/settings.cpp \
 	esp32_airplane/rc_input.cpp \
 	esp32_airplane/wifi_config.cpp \
+	esp32_airplane/mavlink.cpp \
 	esp32_airplane/drivers/sensor_math.cpp \
 	esp32_airplane/drivers/imu.cpp \
 	esp32_airplane/drivers/imu_gy87.cpp \
@@ -51,7 +52,7 @@ HW_MODULES = \
 HDRS = $(wildcard esp32_airplane/*.h esp32_airplane/drivers/*.h)
 
 BUILD   = build
-TESTBINS = $(BUILD)/test_wing_core $(BUILD)/test_rc_settings
+TESTBINS = $(BUILD)/test_wing_core $(BUILD)/test_rc_settings $(BUILD)/test_mavlink
 
 .PHONY: all test clean
 all: test
@@ -65,9 +66,15 @@ $(BUILD)/test_wing_core: tests/test_wing_core.cpp $(MODULES) $(HDRS) | $(BUILD)
 $(BUILD)/test_rc_settings: tests/test_rc_settings.cpp $(HW_MODULES) $(MODULES) $(HDRS) | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(IMUDEF) $(INC) tests/test_rc_settings.cpp $(HW_MODULES) $(MODULES) -o $@
 
+$(BUILD)/test_mavlink: tests/test_mavlink.cpp esp32_airplane/mavlink.cpp \
+                       esp32_airplane/mavlink.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(IMUDEF) $(INC) tests/test_mavlink.cpp \
+	    esp32_airplane/mavlink.cpp -o $@
+
 test: $(TESTBINS)
 	@$(BUILD)/test_wing_core
 	@$(BUILD)/test_rc_settings
+	@$(BUILD)/test_mavlink
 
 clean:
 	rm -rf $(BUILD)

@@ -25,6 +25,7 @@
 #include "rc_input.h"
 #include "wifi_config.h"
 #include "logger.h"
+#include "mavlink.h"
 #include "drivers/imu.h"
 #include "drivers/sensors.h"
 #include "drivers/ld2450.h"
@@ -42,6 +43,14 @@ static RcInput      g_rc;
 static uint32_t     g_rc_last_rx_ms = 0;
 static bool         g_rc_ok = false;
 
+// MAVLink (I1) borrows one of the three UARTs when enabled in the portal;
+// these report whether it currently owns a given one. UART0 = USB (shared
+// with the CSV logger), UART1 = GPS, UART2 = RC receiver.
+static bool mav_owns_uart(uint8_t u) {
+    return g_set.mav.enable && g_set.mav.uart == u;
+}
+static bool mav_on_usb() { return mav_owns_uart(0); }
+
 static Attitude     g_att;
 static GpsFix       g_fix;
 static ControlCmd   g_cmd;
@@ -53,6 +62,9 @@ static PreflightReport g_pf;
 static Ld2450Frame  g_radar;
 static bool         g_armed = false;
 static uint32_t     g_loop_overruns = 0;
+static float        s_home_alt_m = 0;  // latched with the home fix (G4), for
+                                       // GLOBAL_POSITION_INT relative_alt
+static bool         s_gps_up = false;  // gps_init() ran and the GPS is alive
 
 // Last sensor samples kept for the CSV logger (I3): the IMU runs at
 // DT_IMU_HZ but the log ticks at LOG_RATE_HZ, so the log reads the newest.
@@ -138,7 +150,9 @@ static void rc_uart_init() {
 }
 
 static void rc_service(uint32_t now_ms) {
-    if (g_set.rc.proto == RC_PROTO_NONE) {
+    // UART2 taken by MAVLink (portal) => no receiver in sight; report loss
+    // instead of stealing the telemetry bytes.
+    if (g_set.rc.proto == RC_PROTO_NONE || mav_owns_uart(2)) {
         g_rc_ok = false;
         return;
     }
@@ -179,12 +193,195 @@ static void rc_service(uint32_t now_ms) {
         g_rc_ok = false;
 }
 
+// ---------------------------------------------------------------------------
+// MAVLink telemetry (checklist I1) — v2 frames out, REQUEST_DATA_STREAM in,
+// on the UART picked in the portal. docs/mavlink-telemetry.md has the wire
+// rules, the message table and the UART conflict matrix.
+//
+//   UART0 (USB): shares the port with the CSV logger -> CSV moves to UDP
+//   UART1       : GPS is disabled for the session (gps_init/poll skipped)
+//   UART2       : RC is disabled for the session (rc_service skipped, which
+//                 also means preflight fails and the arm switch goes dead)
+// ---------------------------------------------------------------------------
+static MavlinkRx       s_mav_rx;
+static MavlinkSchedule s_mav_sched;
+static uint8_t         s_mav_seq = 0;
+static bool            s_mav_up  = false;
+static Stream*         s_mav_port = nullptr;
+
+static void mav_uart_init() {
+    s_mav_up   = false;
+    s_mav_port = nullptr;
+    if (!g_set.mav.enable) return;
+
+    if (g_set.mav.uart == 0) {
+        Serial.begin(g_set.mav.baud);
+        s_mav_port = &Serial;
+        Serial.printf("[mav] UART0 @ %lu — CSV serial off, use capture.py --udp\n",
+                      (unsigned long)g_set.mav.baud);
+    } else {
+        if (g_set.mav.tx_pin < 0 || g_set.mav.rx_pin < 0) {
+            Serial.println(F("[mav] UART1/2 needs TX+RX pins — set them in the portal"));
+            return;
+        }
+        HardwareSerial* hs = (g_set.mav.uart == 1) ? &Serial1 : &Serial2;
+        hs->begin(g_set.mav.baud, SERIAL_8N1,
+                  g_set.mav.rx_pin, g_set.mav.tx_pin, false);
+        s_mav_port = hs;
+        Serial.printf("[mav] UART%u @ %lu rx=%d tx=%d — %s disabled this session\n",
+                      g_set.mav.uart, (unsigned long)g_set.mav.baud,
+                      g_set.mav.rx_pin, g_set.mav.tx_pin,
+                      g_set.mav.uart == 1 ? "GPS" : "RC");
+    }
+
+    mavlink_rx_init(&s_mav_rx);
+    mav_schedule_init(&s_mav_sched, g_set.mav.rate_hz);
+    s_mav_up = true;
+
+    // First frame: a STATUSTEXT so the GCS console shows the link came up.
+    uint8_t pl[MAV_PAYLOAD_MAX], fr[MAV_FRAME_MAX];
+    uint8_t n = mav_pack_statustext(pl, MAV_SEVERITY_INFO, "mavlink up");
+    size_t w = mavlink_encode(s_mav_seq++, g_set.mav.sysid, 1,
+                              MAV_MSG_STATUSTEXT, pl, n, MAV_CRC_STATUSTEXT,
+                              fr, sizeof(fr));
+    if (w && s_mav_port) s_mav_port->write(fr, w);
+}
+
+static void mav_service(uint32_t now_ms) {
+    if (!s_mav_up || !s_mav_port) return;
+    Stream* p = s_mav_port;
+
+    // ---- inbound: REQUEST_DATA_STREAM steers the fast rate ----------------
+    int guard = 0;
+    while (p->available() > 0 && guard++ < 512) {
+        MavlinkRxMsg m;
+        if (mavlink_rx_feed(&s_mav_rx, (uint8_t)p->read(), &m)) {
+            uint8_t rate = 0;
+            if (mavlink_rds_rate(&m, g_set.mav.sysid, &rate) &&
+                rate != s_mav_sched.rate_hz) {
+                mav_schedule_set_rate(&s_mav_sched, rate);
+                Serial.printf("[mav] GCS set fast rate %u Hz\n", rate);
+            }
+        }
+    }
+
+    // ---- outbound ----------------------------------------------------------
+    uint32_t due = mav_schedule_due(&s_mav_sched, now_ms);
+    if (!due) return;
+
+    uint8_t pl[MAV_PAYLOAD_MAX];
+    uint8_t fr[MAV_FRAME_MAX];
+    const uint8_t sysid = g_set.mav.sysid;
+    auto send = [&](uint8_t msgid, uint8_t crc_extra, uint8_t plen) {
+        size_t n = mavlink_encode(s_mav_seq++, sysid, 1, msgid, pl, plen,
+                                  crc_extra, fr, sizeof(fr));
+        if (n) p->write(fr, n);
+    };
+
+    if (due & MAV_DUE_HEARTBEAT) {
+        uint8_t base = MAV_MODE_FLAG_CUSTOM_MODE;
+        if (g_armed) base |= MAV_MODE_FLAG_SAFETY_ARMED;
+        uint8_t n = mav_pack_heartbeat(pl, MAV_TYPE_FIXED_WING,
+                                       MAV_AUTOPILOT_GENERIC, base,
+                                       (uint32_t)guidance_phase(),
+                                       g_armed ? MAV_STATE_ACTIVE
+                                               : MAV_STATE_STANDBY);
+        send(MAV_MSG_HEARTBEAT, MAV_CRC_HEARTBEAT, n);
+    }
+    if (due & MAV_DUE_ATTITUDE) {
+        uint8_t n = mav_pack_attitude(pl, now_ms,
+                                      g_att.roll, g_att.pitch, g_att.yaw,
+                                      g_att.gx, g_att.gy, g_att.gz);
+        send(MAV_MSG_ATTITUDE, MAV_CRC_ATTITUDE, n);
+    }
+    if (due & MAV_DUE_POSITION) {
+        const float trk = g_fix.course_deg * (float)M_PI / 180.0f;
+        const float gs  = g_fix.ground_mps;
+        const int16_t vx = (int16_t)(gs * cosf(trk) * 100.0f);   // cm/s north
+        const int16_t vy = (int16_t)(gs * sinf(trk) * 100.0f);   // cm/s east
+        const uint16_t hdg = g_fix.valid
+            ? (uint16_t)(g_fix.course_deg * 100.0f) : MAV_HDG_UNKNOWN;
+        uint8_t n = mav_pack_global_position_int(
+            pl, now_ms,
+            (int32_t)(g_fix.lat * 1e7), (int32_t)(g_fix.lon * 1e7),
+            (int32_t)(g_fix.alt_m * 1000.0f),
+            (int32_t)((g_fix.alt_m - s_home_alt_m) * 1000.0f),
+            vx, vy,
+            0,                        // vz: no vertical-speed estimate (yet)
+            hdg);
+        send(MAV_MSG_GLOBAL_POSITION_INT, MAV_CRC_GLOBAL_POSITION_INT, n);
+    }
+    if (due & MAV_DUE_GPS) {
+        const uint8_t fix_type = !g_fix.valid ? MAV_GPS_FIX_NONE
+                                 : (g_fix.fix_quality >= 2 ? MAV_GPS_FIX_DGPS
+                                                           : MAV_GPS_FIX_3D);
+        const uint16_t eph = (g_fix.hdop <= 655.0f)
+            ? (uint16_t)(g_fix.hdop * 100.0f) : (uint16_t)MAV_HDG_UNKNOWN;
+        const uint16_t cog = g_fix.valid
+            ? (uint16_t)(g_fix.course_deg * 100.0f) : (uint16_t)MAV_HDG_UNKNOWN;
+        uint8_t n = mav_pack_gps_raw_int(
+            pl, (uint64_t)now_ms * 1000ull, fix_type,
+            (int32_t)(g_fix.lat * 1e7), (int32_t)(g_fix.lon * 1e7),
+            (int32_t)(g_fix.alt_m * 1000.0f),
+            eph, (uint16_t)MAV_HDG_UNKNOWN,      // epv unknown without a fix calc
+            (uint16_t)(g_fix.ground_mps * 100.0f), cog, g_fix.num_sv);
+        send(MAV_MSG_GPS_RAW_INT, MAV_CRC_GPS_RAW_INT, n);
+    }
+    if (due & MAV_DUE_SYS) {
+        uint32_t sens = MAV_SYS_3D_GYRO | MAV_SYS_3D_ACCEL | MAV_SYS_3D_MAG |
+                        MAV_SYS_ABSOLUTE_PRESSURE;
+        if (gps_healthy())       sens |= MAV_SYS_GPS;
+        if (g_set.rc.proto != RC_PROTO_NONE) sens |= MAV_SYS_RC_RECEIVER;
+        uint32_t health = 0;
+        if (imu_healthy())   health |= MAV_SYS_3D_GYRO | MAV_SYS_3D_ACCEL;
+        if (mag_healthy())   health |= MAV_SYS_3D_MAG;
+        if (baro_healthy())  health |= MAV_SYS_ABSOLUTE_PRESSURE;
+        if (gps_healthy())   health |= MAV_SYS_GPS;
+        if (g_rc_ok)         health |= MAV_SYS_RC_RECEIVER;
+        uint8_t n = mav_pack_sys_status(pl, sens, sens, health,
+                                        0,        // CPU load unknown
+                                        0,        // battery ADC pending (B4/H3)
+                                        -1, -1);  // current / percentage unknown
+        send(MAV_MSG_SYS_STATUS, MAV_CRC_SYS_STATUS, n);
+    }
+    if (due & MAV_DUE_SERVO) {
+        uint8_t n = mav_pack_servo_output_raw(pl, (uint32_t)now_ms * 1000u, 0,
+                                              g_out.left_us, g_out.right_us,
+                                              g_out.throttle_us,
+                                              0, 0, 0, 0, 0);
+        send(MAV_MSG_SERVO_OUTPUT_RAW, MAV_CRC_SERVO_OUTPUT_RAW, n);
+    }
+    if (due & MAV_DUE_VFR) {
+        float thr = g_dbg.throttle_out;
+        if (thr < 0.0f) thr = 0.0f;
+        if (thr > 1.0f) thr = 1.0f;
+        uint8_t n = mav_pack_vfr_hud(pl,
+                                     0.0f,                 // no pitot yet (C5)
+                                     g_fix.ground_mps,
+                                     g_fix.valid ? (int16_t)g_fix.course_deg : 0,
+                                     (uint16_t)(thr * 100.0f + 0.5f),
+                                     g_fix.alt_m,
+                                     0.0f);                // climb: baro later
+        send(MAV_MSG_VFR_HUD, MAV_CRC_VFR_HUD, n);
+    }
+}
+
 // Re-apply cached, non-Settings state after the portal saves. Called by
 // wifi_config so a trim/servo change lands on the next control tick.
 static void on_settings_changed(Settings& s) {
     mixing_load(&s.mix);
-    // RC protocol or UART settings changed -> reopen the port.
-    rc_uart_init();
+    // RC protocol or UART settings changed -> reopen the port, unless
+    // MAVLink is holding UART2 this session.
+    if (!mav_owns_uart(2)) rc_uart_init();
+    // GPS: bring it up if it was skipped at boot because MAVLink had UART1,
+    // or mark it down if MAVLink is about to take the port.
+    if (mav_owns_uart(1)) {
+        s_gps_up = false;
+    } else if (!s_gps_up) {
+        gps_init();
+        s_gps_up = gps_healthy();
+    }
+    mav_uart_init();                 // runs last: its begin() owns the pins
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +453,9 @@ static void log_emit(uint32_t now_ms) {
     char line[LOGGER_MAX_LINE];
     if (!logger_format(line, sizeof(line), s)) return;
 
-    Serial.print(line);                  // sink 1: USB serial (always)
+    // Sink 1: USB serial — off while MAVLink speaks on UART0 (mixed binary
+    // and CSV would corrupt both); UDP keeps streaming either way.
+    if (!mav_on_usb()) Serial.print(line);
     if (s_udp_up && s_peer_port) {       // sink 2: UDP (after HELLO)
         s_udp.beginPacket(s_peer_ip, s_peer_port);
         s_udp.print(line);
@@ -283,7 +482,12 @@ void setup() {
 
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     pwm_init();
-    rc_uart_init();
+    if (mav_owns_uart(2)) {
+        rc_input_defaults(g_rc);
+        Serial.println(F("[rc] skipped — UART2 owned by MAVLink"));
+    } else {
+        rc_uart_init();
+    }
 
     ahrs_init();
     control_init();
@@ -295,7 +499,12 @@ void setup() {
     ok &= imu_calibrate_rest();     // C1 gyro bias at rest
     ok &= baro_init();
     ok &= mag_init();
-    ok &= gps_init();
+    if (mav_owns_uart(1)) {
+        Serial.println(F("[mav] GPS port borrowed — gps_init skipped"));
+    } else {
+        ok &= gps_init();
+        s_gps_up = gps_healthy();
+    }
     ok &= lidar_init();
 
     Serial.printf("init: imu=%d baro=%d mag=%d gps=%d@%u lidar=%d rc=%s\n",
@@ -310,9 +519,13 @@ void setup() {
     Serial.printf("[wifi] portal: SSID '%s' port %u\n",
                   wifi_config_ssid(), g_set.wifi.http_port);
 
+    // MAVLink telemetry (I1): open the configured UART after every other
+    // user of it has run, so its begin() wins the pins.
+    mav_uart_init();
+
     // Real-time logger (I3): CSV schema marker for the ground tool, and the
     // UDP subscriber port (capture.py sends a HELLO to start the stream).
-    Serial.println(logger_csv_header());
+    if (!mav_on_usb()) Serial.println(logger_csv_header());
     log_udp_begin();
 
     // Arming gate (H6): we will not arm until AHRS converges + preflight passes.
@@ -421,13 +634,14 @@ void loop() {
     // ---- nav / guidance slot (DT_NAV_HZ) ----------------------------------
     if (now_us - t_nav >= (1000000UL / DT_NAV_HZ)) {
         t_nav = now_us;
-        gps_poll(g_fix);
+        if (!mav_owns_uart(1)) gps_poll(g_fix);
         if (g_fix.valid) gps_age_s = 0; else gps_age_s += 1.0f / DT_NAV_HZ;
 
         // First good fix becomes home (G4). TODO: latch on arming, not first fix.
         static bool home_set = false;
         if (!home_set && gps_trustworthy(g_fix)) {
             guidance_set_home(g_fix.lat, g_fix.lon);
+            s_home_alt_m = g_fix.alt_m;      // for relative_alt in telemetry
             home_set = true;
         }
 
@@ -473,11 +687,12 @@ void loop() {
         // TODO: read UART2 bytes into Ld2450Stream::feed().
     }
 
-    // ---- real-time log slot (I3) ------------------------------------------
+    // ---- real-time log slot (I3) + MAVLink (I1) ---------------------------
     if (now_us - t_log >= (1000000UL / LOG_RATE_HZ)) {
         t_log = now_us;
         log_udp_service();               // pick up / keep a ground subscriber
         log_emit(now_ms);
+        mav_service(now_ms);             // due telemetry frames + RX pump
         digitalWrite(PIN_STATUS_LED, g_armed ? HIGH :
                      (millis() / 250) & 1);        // blink = not armed
     }

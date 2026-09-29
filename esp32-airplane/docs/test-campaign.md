@@ -79,6 +79,11 @@ python3 tools/wing_logger/capture.py --udp 192.168.4.1:5005 -o T2_vuelo.csv
 python3 tools/wing_logger/plot.py T0_bench.csv --out T0_bench.png
 ```
 
+> **Si MAVLink está activo en UART0** (`mv_en=1, mv_uart=0`), el CSV serial se
+> apaga (mezclar CSV con frames binarios arruinaría ambos) — usa **siempre**
+> `--udp` en ese caso. Con `mv_uart` 1/2 el USB sigue libre para el CSV.
+> [`mavlink-telemetry.md`](mavlink-telemetry.md)
+
 `capture.py` imprime cada 5 s: líneas, Hz reales y **huecos** (>3× periodo =
 tick perdido). Si la cabecera no aparece: reiniciar la placa con la captura
 ya corriendo (la cabecera se emite en `setup()`).
@@ -364,6 +369,7 @@ filas del log — los umbrales de arriba salen de los primeros CSV de T1/T2.
 |---|---|
 | CSV `logger.{h,cpp}` 39 columnas @25 Hz, host-tested | ✅ esta iteración |
 | Sink USB + UDP :5005 con suscripción HELLO | ✅ |
+| Telemetría MAVLink 2.0 al GCS (UART configurable, portal `mv_*`) | ✅ `mavlink-telemetry.md` — falta conectar un QGC real (I4) |
 | `capture.py` / `plot.py` (5 paneles) | ✅ `tools/wing_logger/` |
 | Modo passthrough etapa 1 (default ON, portal, NVS) | ✅ |
 | Columna `wind` en el schema | ✅ pre-cableada |

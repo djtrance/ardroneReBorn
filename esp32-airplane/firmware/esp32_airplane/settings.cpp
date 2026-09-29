@@ -110,6 +110,16 @@ void settings_defaults(Settings& s) {
                     TF_ESO_ROLL | TF_ESO_PITCH | TF_B0 | TF_FENCE_MARGIN |
                     TF_PREFLIGHT | TF_LOOP_JITTER | TF_LINK_AGE | TF_IMU_MODEL;
 
+    // --- MAVLink telemetry (I1) --------------------------------------------
+    MavlinkSettings& mv = s.mav;
+    mv.enable   = 0;                  // opt-in: CSV logger owns UART0 by default
+    mv.uart     = 0;                  // UART0/USB: the bench path to a GCS
+    mv.rate_hz  = 10;                 // fast messages at 10 Hz
+    mv.sysid    = 1;                  // standard first-vehicle id
+    mv.baud     = 57600;              // QGC/MP default serial baud
+    mv.tx_pin   = -1;                 // -1 = "not chosen yet" (uart 1/2 need it)
+    mv.rx_pin   = -1;
+
     s.crc = settings_crc16((const uint8_t*)&s, kCrcOffset);
 }
 
@@ -211,6 +221,21 @@ int settings_validate(Settings& s) {
     t.enable     = t.enable ? 1 : 0;
     t.fast_only  = t.fast_only ? 1 : 0;
     fixed += clamp_u16(t.rate_hz, 1, 200);
+
+    MavlinkSettings& mv = s.mav;
+    mv.enable  = mv.enable ? 1 : 0;
+    if (mv.uart > 2) { mv.uart = 0; fixed++; }
+    if (mv.rate_hz < 1 || mv.rate_hz > 25) {     // <= LOG_RATE_HZ
+        mv.rate_hz = (mv.rate_hz > 25) ? 25 : 10;
+        fixed++;
+    }
+    if (mv.sysid == 0) { mv.sysid = 1; fixed++; }   // 0 is not a valid system
+    if (mv.baud < 9600 || mv.baud > 921600) {
+        mv.baud = (mv.baud > 921600) ? 921600 : 57600;
+        fixed++;
+    }
+    if (mv.tx_pin < -1 || mv.tx_pin > 39) { mv.tx_pin = -1; fixed++; }
+    if (mv.rx_pin < -1 || mv.rx_pin > 39) { mv.rx_pin = -1; fixed++; }
 
     return fixed;
 }

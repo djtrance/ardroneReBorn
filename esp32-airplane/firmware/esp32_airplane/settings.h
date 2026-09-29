@@ -15,7 +15,7 @@
 #include <stddef.h>
 
 #define SETTINGS_MAGIC      0x57494E47u   // "WING"
-#define SETTINGS_VERSION    6u            // bump on any struct change
+#define SETTINGS_VERSION    7u            // bump on any struct change
 #define SETTINGS_BLOB_MAX   512
 
 #define SSID_MAX            32
@@ -116,6 +116,25 @@ struct TelemSettings {
 #define TF_IMU_MODEL        (1u << 14)
 
 // ---------------------------------------------------------------------------
+// MAVLink telemetry over a configurable serial port (checklist I1)
+//
+// The ESP32 has three UARTs and all three are spoken for (0 = USB, 1 = GPS,
+// 2 = RC receiver), so picking a port means picking whose port to borrow —
+// docs/mavlink-telemetry.md has the conflict table. Default is OFF on
+// UART0, which keeps the aircraft reachable from QGroundControl over USB
+// while the CSV logger moves to its UDP sink.
+// ---------------------------------------------------------------------------
+struct MavlinkSettings {
+    uint8_t  enable;                   // 1 => stream MAVLink v2 frames
+    uint8_t  uart;                     // 0 = UART0/USB, 1 = UART1, 2 = UART2
+    uint8_t  rate_hz;                  // fast messages/sec (att/pos/servo/vfr)
+    uint8_t  sysid;                    // MAVLink system id (GCS target)
+    uint32_t baud;                     // line rate on that UART
+    int16_t  tx_pin;                   // GPIO, -1 = default; REQUIRED uart 1/2
+    int16_t  rx_pin;
+};
+
+// ---------------------------------------------------------------------------
 // The whole persisted blob
 // ---------------------------------------------------------------------------
 struct Settings {
@@ -123,10 +142,11 @@ struct Settings {
     uint16_t version;                  // SETTINGS_VERSION
     uint16_t size;                     // sizeof(Settings) at write time
 
-    MixSettings   mix;
-    RcSettings    rc;
-    WifiSettings  wifi;
-    TelemSettings telem;
+    MixSettings     mix;
+    RcSettings      rc;
+    WifiSettings    wifi;
+    TelemSettings   telem;
+    MavlinkSettings mav;
 
     uint16_t crc;                      // CRC-16/CCITT over everything above
 };

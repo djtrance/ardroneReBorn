@@ -38,7 +38,8 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 | Geofence circle + altitude (G5) | ✅ implemented (independent layer) |
 | Failsafe FSM + preflight gate (H1/H6) | ✅ states + thresholds defined |
 | `config.h` parameter layer (E5) | ✅ all gains/limits centralized |
-| Host unit tests (J2 / E6) | ✅ **343 assertions**: 279 firmware (111 core + 168 config/RC/sensor) + **64 wing-SIL (J1)** |
+| Host unit tests (J2 / E6) | ✅ **414 assertions**: 350 firmware (111 core + 186 config/RC/sensor + 53 MAVLink) + **64 wing-SIL (J1)** |
+| MAVLink telemetry over UART (I1) | ✅ v2 encoder + RX **golden-tested vs pymavlink**, portal `mv_*`, settings v7 — **needs a real GCS connect** (I4) |
 | Real-time CSV logger + ground tools (I3/I2) | ✅ 39-column CSV @25 Hz on USB + UDP:5005, host-tested formatter, `tools/wing_logger/{capture,plot}.py` |
 | Etapa-1 passthrough mode (T0) | ✅ RX→elevon mix direct, **default ON**, portal checkbox, persisted in NVS |
 | LD2450 frame parser + track matcher (C7) | ✅ real parser — **verify offsets vs firmware** |
@@ -432,8 +433,14 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 - [ ] **I1. Protocol**
   - [x] Feasibility study written → **`docs/rc-and-telemetry.md`** (options A–E, 15 DIY fields, ~83 responses/s)
   - [ ] Decision: [ ] SBUS + S.Port · [x] **FPort (recommended if the RX is flashable)** · [ ] DSMX · [ ] FlySky · [ ] WiFi
+    > **Split decision (2026-09-23):** the link has two independent halves.
+    > **GCS link (laptop/tablet) → done as a first cut: MAVLink 2.0 over a
+    > configurable UART** — `mavlink.{h,cpp}` golden-tested vs pymavlink,
+    > portal `mv_*`, docs → [`docs/mavlink-telemetry.md`](docs/mavlink-telemetry.md).
+    > **RC-link telemetry (TX16S screen)** stays on the FPort option above —
+    > SBUS is one-way, so this half is unchanged.
   - [ ] Link: [ ] ELRS/900 MHz CRSF telemetry · [ ] WiFi (range < 50 m) · [ ] both
-  - [ ] Baud / packet rate: ______
+  - [ ] Baud / packet rate: ______ *(MAVLink GCS side: portal 9600–921600, default 57600; fast rate 1–25 Hz, QGC's REQUEST_DATA_STREAM steers it)*
   - [ ] Half-duplex TX wired (1N4148 on UART2) + S.Port poll loop coded: [ ]
 - [ ] **I2. Telemetry fields** (minimum set)
   - [ ] attitude, altitude, groundspeed, airspeed est, heading
@@ -538,7 +545,9 @@ Collecting items we don't want to lose but aren't blocking yet:
 
 - [ ] L1. Companion camera choice: [ ] ESP32-CS (streaming) [ ] ESP32-S3 + OV2640 [ ] separate cam
 - [ ] L2. Do we attempt onboard VO at all on ESP32? (recommended: **no**, defer)
-- [ ] L3. MAVLink vs custom for telemetry — decide with GCS in I1
+- [x] L3. MAVLink vs custom for telemetry — decide with GCS in I1 → **split:
+  MAVLink 2.0 (minimal, golden-tested) for the GCS link** (landed,
+  `docs/mavlink-telemetry.md`); custom/FPort stays on the TX16S side
 - [ ] L4. Dual-motor wing variant later? (would enable thrust-asymmetry research)
 - [ ] L5. Parachute / ballistic recovery as last-resort failsafe?
 - [ ] L6. Reuse `skyproxy` telemetry concepts? (probably not — different protocol family)
@@ -569,13 +578,16 @@ Collecting items we don't want to lose but aren't blocking yet:
 | 2026-09-22 | C4 | **Line rate raised 9600 → 115200** via UBX-CFG-PRT with a **probe handshake**: config pushed at 9600 → probe for NMEA → not found? probe 115200 (retained-config modules) → CFG-PRT jump → **probe-verify on the new baud, revert with re-probe on failure** (GPS never left mute). Fix latency 151 → 13 ms/sentence; init log shows `gps=1@115200`. **257 tests** (111 + 146) |
 | 2026-09-22 | **J1** | **6-DOF wing SIL landed** (`tools/simulator/wing_plant.{h,cpp}` + `test_wing_sil`, **64 assertions**, in `make check`): RK4 body-axes plant (ω×v, gravity force-only), exact level-flight trim (`L=W−T·sinα`; `Cm0` = CG at V_CRUISE), stall break (linear→flat-plate), steady-wind input, control signs = controller intent. **b0 identified: roll 87.3 / pitch 75.2 rad/s² @15 m/s → written to config (`B0_ROLL_REF` 9→87, `B0_PITCH_REF` 6→75)** — old values were ~10× low (ADRC output would have saturated against the real plant). Closed-loop over the actual `control.cpp`: level hold, roll-step tracking + return, bank clamp @50°, **stall override beats a full nose-up stick and clears on recovery**, V_NE flag, surface slew ≤0.01745/step, airspeed PI, 4 s random-stick fuzz. **64 SIL + 257 firmware green** (both IMUs) |
 | 2026-09-23 | **I3 / etapa 1** | **Real-time CSV logger + passthrough mode + campaign docs**: `logger.{h,cpp}` — 39-column CSV @25 Hz, formatter **host-tested** (schema pinned vs `tools/wing_logger/*.py`), sinks = USB serial + UDP `:5005` (HELLO subscription); tools `capture.py` (serial/UDP → CSV, rate/gap stats) + `plot.py` (5 panels), smoke-tested end-to-end from the real C formatter. **Passthrough (etapa 1)**: `mix.passthrough` default **ON** — RX sticks → `mix_elevons` directly (no AHRS/control/envelope/RTH in the loop), portal checkbox + NVS; RTH triggers guarded off. Docs: **`docs/airframe-measurements.md`** (§A sheet: mass/CG/span/inertia pendulum/δmax/thrust curve with formulas + sign-off) and **`docs/test-campaign.md`** (logger tutorial, T0 bench with D1 direction table, T1 glide, T2 GPS stall campaign with wind-triangle + event detector, T3 IMU+baro wind classifier design with thresholds; 8 Mermaid diagrams). **279 firmware tests** (111 + 168), both IMUs |
+| 2026-09-23 | **I1 (GCS)** | **MAVLink 2.0 telemetry over a configurable UART**: `mavlink.{h,cpp}` — v2 frame encoder with **zero-truncation**, CRC-16/MCRF4XX (skips the magic, includes `crc_extra`), 8 packers, RX state machine (early msgid/length gate + drop-to-magic resync + signed-frame drop) handling `REQUEST_DATA_STREAM` (rate clamped 1–25 Hz), 7-message scheduler (1 Hz group + fast group). **Output bytes byte-compared against `pymavlink` goldens** (HB×2, ATT, GPI, VFR-trim, GPS, SYS, SRV, TXT + inbound RDS). Settings **v6→v7** (`MavlinkSettings`: enable/uart/baud/rate/sysid/tx/rx with clamps), portal `mv_*` + JSON `"mav"`, `.ino` wiring (UART0 steals USB → CSV to UDP only; UART1 → GPS skipped; UART2 → RC skipped; `mav_uart_init()` last so its `begin()` owns pins). Docs: **`docs/mavlink-telemetry.md`** (frame rules, message table, RX state machine, UART conflict matrix, connect recipe; 4 Mermaid). **350 firmware tests** (111 + 186 + 53), both IMUs |
 
-> **Next iteration target**: **I3 real-time logger + etapa-1 passthrough done**
-> (279 firmware tests). Next: **C6 LiDAR** (last §C stub) + **F6 wind
-> classifier** (design ready in `docs/test-campaign.md` §5 — code it pure and
-> host-test it against synthetic log rows) + **§B/B3 bench** with the T0
-> checklist (`docs/test-campaign.md` §2). When the wing arrives: run the §A
-> sheet (`docs/airframe-measurements.md`) → re-ID `b0` → T1/T2 for `V_stall`.
-> C4 live-on-the-wire check at 115200/5 Hz and Spektrum status byte (H2) on
+> **Next iteration target**: **MAVLink GCS link + I3 logger + etapa-1
+> passthrough done** (350 firmware tests / 414 with the wing SIL). Next:
+> **connect a real QGC** (I4) with `mv_uart=0`, then **C6 LiDAR** (last §C
+> stub) + **F6 wind classifier** (design ready in `docs/test-campaign.md`
+> §5 — code it pure and host-test it against synthetic log rows) + **§B/B3
+> bench** with the T0 checklist (`docs/test-campaign.md` §2). When the wing
+> arrives: run the §A sheet (`docs/airframe-measurements.md`) → re-ID `b0` →
+> T1/T2 for `V_stall`. C4 live-on-the-wire check at 115200/5 Hz and Spektrum
+> status byte (H2) on
 > the bench. SIL-wise: J1b = sensor noise + gust time-series + ESC lag once
 > D1/B3 land.
