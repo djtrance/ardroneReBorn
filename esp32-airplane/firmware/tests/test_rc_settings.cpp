@@ -15,6 +15,7 @@
 #include "config.h"
 #include "gps_nav.h"
 #include "logger.h"
+#include "i2c_scan.h"
 #include "drivers/sensor_math.h"
 #include "drivers/sensors.h"
 
@@ -814,6 +815,62 @@ static void test_logger_csv() {
 }
 
 // ===========================================================================
+// 11. I2C scan JSON (portal /api/i2c + the boot log line)
+// ===========================================================================
+static void test_i2c_scan_json() {
+    printf("[i2c scan json]\n");
+    char buf[512];
+
+    // Nobody on the bus: still a valid, fully-null document.
+    I2cScan sc;
+    memset(&sc, 0, sizeof(sc));
+    size_t n = i2c_scan_json(sc, buf, sizeof(buf));
+    ck(n > 0, "empty scan formats");
+    ck(strcmp(buf,
+        "{\"addrs\":[],\"mpu\":null,\"hmc\":null,\"qmc\":null,\"bmp\":null}")
+       == 0, "empty scan exact JSON");
+
+    // A healthy GY-87: HMC5883L + MPU6050 + BMP180, no QMC.
+    sc.n = 3;
+    sc.addrs[0] = 0x1E; sc.addrs[1] = 0x68; sc.addrs[2] = 0x77;
+    sc.mpu_ok = true;  sc.mpu_who = 0x68;
+    sc.hmc_ok = true;  sc.hmc_id[0] = 0x48; sc.hmc_id[1] = 0x34;
+                      sc.hmc_id[2] = 0x33;   // "H433"
+    sc.bmp_ok = true;  sc.bmp_id = 0x55;
+    n = i2c_scan_json(sc, buf, sizeof(buf));
+    ck(n > 0, "GY-87 scan formats");
+    ck(strstr(buf, "\"addrs\":[0x1e,0x68,0x77]") != nullptr,
+       "address list, lowercase hex, in scan order");
+    ck(strstr(buf, "\"mpu\":\"68\"") != nullptr, "MPU WHO_AM_I as hex string");
+    ck(strstr(buf, "\"hmc\":\"483433\"") != nullptr,
+       "HMC id concatenated big-endian (H433)");
+    ck(strstr(buf, "\"qmc\":null") != nullptr, "absent QMC stays null");
+    ck(strstr(buf, "\"bmp\":\"55\"") != nullptr, "BMP id present");
+
+    // The mag answers but the ID read failed -> null, not a bogus id.
+    sc.hmc_ok = false;
+    i2c_scan_json(sc, buf, sizeof(buf));
+    ck(strstr(buf, "\"hmc\":null") != nullptr,
+       "failed HMC id read reports null");
+
+    // QMC5883L clone detected at 0x0D.
+    sc.qmc_ok = true; sc.qmc_id = 0xFF;
+    i2c_scan_json(sc, buf, sizeof(buf));
+    ck(strstr(buf, "\"qmc\":\"ff\"") != nullptr, "QMC chip id reported");
+
+    // Saturated list: only I2C_SCAN_MAX addresses are emitted.
+    memset(sc.addrs, 0x55, sizeof(sc.addrs));
+    sc.n = 40;
+    i2c_scan_json(sc, buf, sizeof(buf));
+    int cnt = 0;
+    for (const char* p = buf; (p = strstr(p, "0x55")); p += 4) cnt++;
+    ck(cnt == I2C_SCAN_MAX, "address list capped at I2C_SCAN_MAX");
+
+    ck(i2c_scan_json(sc, buf, 16) == 0, "undersized buffer rejected");
+    ck(i2c_scan_json(sc, nullptr, 512) == 0, "null buffer rejected");
+}
+
+// ===========================================================================
 int main() {
     printf("=== esp32-airplane config/RC/sensor tests ===\n");
     test_settings_codec();
@@ -828,6 +885,7 @@ int main() {
     test_gps_ublox6();
     test_mixing_settings();
     test_logger_csv();
+    test_i2c_scan_json();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -15,6 +15,7 @@
 
 #pragma once
 #include "settings.h"
+#include "logger.h"                     // LogSample: the live-view schema
 
 // Start AP/STA and the HTTP server. `settings` is the live object the portal
 // edits. `on_change` (may be null) is invoked after a successful save so the
@@ -29,3 +30,10 @@ bool wifi_config_active();
 
 // SSID actually being advertised / joined, for the boot banner.
 const char* wifi_config_ssid();
+
+// Hand one live sample (logger schema, same 39 columns the CSV carries) plus
+// the magnetometer vector to the portal, for GET /api/live and the attitude
+// viewer (/attitude). Call at the log rate from loop(); the portal copies the
+// struct, so the caller may reuse its buffer. `mag_ut` may be null.
+void wifi_config_publish(const LogSample& s, const float mag_ut[3],
+                         bool mag_ok);

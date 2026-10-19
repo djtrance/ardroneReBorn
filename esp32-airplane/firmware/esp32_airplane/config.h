@@ -7,9 +7,14 @@
 #include <stdint.h>
 
 // ---------------------------------------------------------------------------
-// Build options
+// Build options — every CFG_* may be overridden from the command line
+// (build_opt.h / -D) without editing this file.
 // ---------------------------------------------------------------------------
+#ifndef CFG_USE_MAG
 #define CFG_USE_MAG             1       // magnetometer for heading (checklist C3)
+#endif                              // -DCFG_USE_MAG=0: board without a mag ->
+                                    // heading falls back to GPS course, and
+                                    // preflight's mag gate is satisfied.
 #define CFG_USE_LIDAR           1       // TFmini (C6)
 #define CFG_USE_LD2450          1       // HLK-LD2450 radar (C7)
 #define CFG_USE_AIRSPEED_GPS    1       // airspeed from GPS+wind (C5, start here)

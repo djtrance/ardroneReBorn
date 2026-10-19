@@ -43,6 +43,7 @@ HW_MODULES = \
 	esp32_airplane/rc_input.cpp \
 	esp32_airplane/wifi_config.cpp \
 	esp32_airplane/mavlink.cpp \
+	esp32_airplane/i2c_scan.cpp \
 	esp32_airplane/drivers/sensor_math.cpp \
 	esp32_airplane/drivers/imu.cpp \
 	esp32_airplane/drivers/imu_gy87.cpp \

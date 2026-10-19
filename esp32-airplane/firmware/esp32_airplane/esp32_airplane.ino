@@ -26,6 +26,7 @@
 #include "wifi_config.h"
 #include "logger.h"
 #include "mavlink.h"
+#include "i2c_scan.h"
 #include "drivers/imu.h"
 #include "drivers/sensors.h"
 #include "drivers/ld2450.h"
@@ -70,6 +71,8 @@ static bool         s_gps_up = false;  // gps_init() ran and the GPS is alive
 // DT_IMU_HZ but the log ticks at LOG_RATE_HZ, so the log reads the newest.
 static Vec3  g_accel = {0, 0, 0};       // g
 static Vec3  g_gyro  = {0, 0, 0};       // rad/s
+static Vec3  g_mag   = {0, 0, 0};       // uT, last GOOD sample (CSV has no mag
+static bool  g_mag_ok = false;          //  column; the portal's /api/live has)
 static float g_baro_pa = 0, g_baro_c = 0;
 
 // Airspeed estimate: start with GPS ground speed (checklist C5 method 1).
@@ -450,6 +453,11 @@ static void log_emit(uint32_t now_ms) {
     s.thr_out = g_dbg.throttle_out;
     s.overruns = g_loop_overruns;
 
+    // Portal live view (GET /api/live) before any formatting bail-out, so a
+    // bad line never starves the attitude page.
+    float mag3[3] = {g_mag.x, g_mag.y, g_mag.z};
+    wifi_config_publish(s, mag3, g_mag_ok);
+
     char line[LOGGER_MAX_LINE];
     if (!logger_format(line, sizeof(line), s)) return;
 
@@ -512,6 +520,16 @@ void setup() {
                   gps_healthy(), (unsigned)gps_baud(), lidar_healthy(),
                   g_set.rc.proto == RC_PROTO_NONE ? "off" : "on");
     if (!ok) Serial.println(F("!! sensor init incomplete — preflight will block arming"));
+
+    // Bus scan: one line that answers "why mag=0?" straight from the boot
+    // log (same JSON the portal serves at GET /api/i2c).
+    {
+        I2cScan sc;
+        i2c_scan_run(sc);
+        char jb[640];
+        if (i2c_scan_json(sc, jb, sizeof(jb)))
+            Serial.printf("[i2c] %s\n", jb);
+    }
 
     // Configuration portal (I5). Runs for the whole session; changes are
     // written to NVS immediately so they survive a power cycle.
@@ -622,6 +640,8 @@ void loop() {
         Vec3 a, g, m;
         bool imu_ok = imu_read(a, g);
         bool mag_ok = mag_read(m) && CFG_USE_MAG;
+        g_mag_ok = mag_ok;
+        if (mag_ok) g_mag = m;
         if (imu_ok) {
             g_accel = a;                      // newest sample for the logger
             g_gyro  = g;

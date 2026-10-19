@@ -51,7 +51,7 @@ esp32-airplane/
 │   ├── test-campaign.md          # ★ logger tutorial + T0..T3 test campaign
 │   └── mavlink-telemetry.md      # MAVLink 2.0 GCS link on a configurable UART
 └── firmware/
-    ├── Makefile                  # `make test` → 350 host unit tests
+    ├── Makefile                  # `make test` → 363 host unit tests
     │                             # `make test IMU=87` → GY-87 board instead
     ├── tests/
     │   ├── test_wing_core.cpp    # J2: mixing, envelope, L1, RTH, NMEA, LD2450, AHRS, failsafe (111)
@@ -120,9 +120,9 @@ python3 -c "import serial,sys; s=serial.Serial('/dev/cu.usbserial-0001',115200,t
 ### Run the tests
 
 ```bash
-cd esp32-airplane/firmware && make test      # 350 assertions
+cd esp32-airplane/firmware && make test      # 363 assertions
 # or from the repo-wide suite:
-cd tools/simulator && make check             # quad (90) + wing (350) + wing SIL (64)
+cd tools/simulator && make check             # quad (90) + wing (363) + wing SIL (64)
 ```
 
 ### Real-time log (checklist I3)
@@ -135,6 +135,26 @@ python3 ../../tools/wing_logger/plot.py run.csv --out run.png
 
 Full workflow (bench T0 → stall T2 → wind classifier): see
 [`docs/test-campaign.md`](docs/test-campaign.md).
+
+### Live attitude viewer + I2C scan (WiFi portal)
+
+The configuration portal also shows the aircraft live — join the AP
+(`wing-XXXX`) and open <http://192.168.4.1/>:
+
+- **`/attitude`** — canvas artificial horizon (roll/pitch) plus what the IMU
+  sees: gyro, accel, mag µT, baro, GPS, surface outputs and status chips.
+  Polled from `/api/live` at 10 Hz.
+- **`/api/live`** — newest log sample as JSON: the same 39 CSV columns plus
+  the mag vector (which the CSV does not carry).
+- **`/api/i2c`** — full bus scan with the known parts' ID registers; the one
+  line to read when a sensor says `mag=0` (also printed once at boot).
+  Refused while armed — the scan blocks tens of ms inside the control loop.
+
+That scan is how `mag=0` was diagnosed on this GY-87 in one line —
+`{"addrs":[0x68,0x77],"mpu":"68","hmc":null,"qmc":null,"bmp":"55"}`:
+no chip answers at 0x1E (HMC5883L) or 0x0D (QMC clone) ⇒ the board has no
+working magnetometer, so `build_opt.h` sets `-DCFG_USE_MAG=0` (heading falls
+back to GPS course) instead of blocking preflight forever.
 
 ### MAVLink to a ground station (checklist I1)
 

@@ -1,7 +1,30 @@
 #include "wifi_config.h"
 #include "config.h"
+#include "i2c_scan.h"
 #include <string.h>
 #include <stdlib.h>
+
+// ---------------------------------------------------------------------------
+// Live sample for the portal's live view (GET /api/live, page /attitude).
+// The aircraft loop publishes at the log rate; the HTTP handlers read it.
+// Both run on the same loop task, so a plain struct copy needs no locking.
+// ---------------------------------------------------------------------------
+static LogSample s_live;
+static float     s_live_mag[3] = {0.0f, 0.0f, 0.0f};
+static bool      s_live_mag_ok = false;
+static bool      s_live_valid  = false;
+
+void wifi_config_publish(const LogSample& s, const float mag_ut[3],
+                         bool mag_ok) {
+    s_live = s;
+    if (mag_ut) {
+        s_live_mag[0] = mag_ut[0];
+        s_live_mag[1] = mag_ut[1];
+        s_live_mag[2] = mag_ut[2];
+    }
+    s_live_mag_ok = mag_ok;
+    s_live_valid  = true;
+}
 
 #ifdef ARDUINO
 
@@ -155,9 +178,69 @@ static void send_text(int code, const char* type, const String& body) {
 }
 
 static String html_index();
+static String html_attitude();
 
 static void handle_index() {
     send_text(200, "text/html", html_index());
+}
+
+static void handle_attitude() {
+    send_text(200, "text/html", html_attitude());
+}
+
+// GET /api/live — newest published sample (same schema as the CSV logger)
+// plus the magnetometer vector, which the CSV does not carry.
+static void handle_live() {
+    if (!s_live_valid) {
+        send_text(503, "application/json", "{\"live\":false}");
+        return;
+    }
+    const LogSample& s = s_live;
+    char buf[1024];
+    snprintf(buf, sizeof(buf),
+        "{\"t\":%lu,\"mode\":%u,\"armed\":%u,\"rc_ok\":%u,\"phase\":%u,"
+        "\"fs_evt\":%u,\"env\":%u,\"wind\":%u,"
+        "\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,"
+        "\"gx\":%.4f,\"gy\":%.4f,\"gz\":%.4f,"
+        "\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f,"
+        "\"mag\":[%.1f,%.1f,%.1f],\"mag_ok\":%u,"
+        "\"baro_pa\":%.1f,\"baro_c\":%.1f,"
+        "\"fix\":%u,\"sv\":%u,\"hdop\":%.1f,"
+        "\"gps_v\":%.2f,\"gps_alt\":%.1f,"
+        "\"rc_p\":%.2f,\"rc_r\":%.2f,\"rc_t\":%.2f,"
+        "\"l_us\":%u,\"r_us\":%u,\"thr\":%.2f,"
+        "\"vest\":%.1f,\"overruns\":%lu}",
+        (unsigned long)s.t_ms, s.mode, s.armed, s.rc_ok, s.phase,
+        s.fs_evt, s.env, s.wind,
+        (double)s.ax, (double)s.ay, (double)s.az,
+        (double)s.gx, (double)s.gy, (double)s.gz,
+        (double)s.roll, (double)s.pitch, (double)s.yaw,
+        (double)s_live_mag[0], (double)s_live_mag[1], (double)s_live_mag[2],
+        s_live_mag_ok ? 1u : 0u,
+        (double)s.baro_pa, (double)s.baro_c,
+        s.fix, s.sv, (double)s.hdop,
+        (double)s.gps_v, (double)s.gps_alt,
+        (double)s.rc_p, (double)s.rc_r, (double)s.rc_t,
+        (unsigned)s.l_us, (unsigned)s.r_us, (double)s.thr_out,
+        (double)s.vest, (unsigned long)s.overruns);
+    send_text(200, "application/json", String(buf));
+}
+
+// GET /api/i2c — full bus scan with the known parts' ID registers. The scan
+// blocks a few tens of ms inside the loop task, so it is refused while armed.
+static void handle_i2c() {
+    if (s_live_valid && s_live.armed) {
+        send_text(409, "application/json", "{\"err\":\"armed\"}");
+        return;
+    }
+    I2cScan sc;
+    i2c_scan_run(sc);
+    char buf[640];
+    if (!i2c_scan_json(sc, buf, sizeof(buf))) {
+        send_text(500, "application/json", "{\"err\":\"overflow\"}");
+        return;
+    }
+    send_text(200, "application/json", String(buf));
 }
 
 static void handle_json() {
@@ -268,7 +351,10 @@ bool wifi_config_begin(Settings& settings, void (*on_change)(Settings&)) {
     uint16_t port = settings.wifi.http_port ? settings.wifi.http_port : 80;
     s_srv = new WebServer(port);
     s_srv->on("/",             HTTP_GET,  handle_index);
+    s_srv->on("/attitude",     HTTP_GET,  handle_attitude);
     s_srv->on("/api/settings", HTTP_GET,  handle_json);
+    s_srv->on("/api/live",     HTTP_GET,  handle_live);
+    s_srv->on("/api/i2c",      HTTP_GET,  handle_i2c);
     s_srv->on("/api/save",     HTTP_POST, handle_save);
     s_srv->on("/api/factory",  HTTP_POST, handle_factory);
     s_srv->onNotFound([]() { send_text(404, "text/plain", "not found"); });
@@ -314,9 +400,13 @@ background:#0e131a;color:#dfe6ee;box-sizing:border-box}
 button{width:100%;padding:12px;border:0;border-radius:8px;background:#2f9e44;
 color:#fff;font-size:16px;font-weight:700;margin-top:4px}
 button.alt{background:#37506b}
+a.btn{display:block;padding:12px;border-radius:8px;background:#37506b;
+color:#fff;font-size:16px;font-weight:700;text-decoration:none;
+text-align:center;margin-bottom:14px}
 #msg{margin:10px 2px;font-size:13px;min-height:18px}
 small{color:#7b8ea5}
 </style></head><header>WING &mdash; configuration</header><main>
+<a class=btn href=/attitude>&#9673; VISOR DE ACTITUD (IMU) &rarr;</a>
 <form id=f>
 <section><h2>Mezcla / servos (D1-D3)</h2><div class=grid>
 <div><label>Trim elevon L (us)</label><input name=ml_trim type=number min=1000 max=2000></div>
@@ -423,6 +513,129 @@ f.onsubmit=async e=>{e.preventDefault();
  msg.textContent=r.ok?('Guardado'+(r.clamped?' ('+r.clamped+' valores corregidos)':''))
   :'ERROR al guardar';};
 fill();
+</script></html>)HTML");
+}
+
+// ===========================================================================
+// Attitude / raw-IMU viewer (page /attitude): a canvas artificial horizon fed
+// by GET /api/live, plus the numbers behind it — what the IMU actually sees.
+// ===========================================================================
+static String html_attitude() {
+    return String(
+R"HTML(<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Wing &mdash; actitud</title><style>
+body{font:14px system-ui,sans-serif;margin:0;background:#0b0f14;color:#dfe6ee}
+header{background:#1b2531;padding:12px 16px;display:flex;
+justify-content:space-between;align-items:center;font-weight:700}
+header a{color:#7fd1ff;text-decoration:none}
+main{padding:12px;max-width:520px;margin:0 auto;text-align:center}
+canvas{background:#101418;border-radius:12px;max-width:100%}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+.c{background:#1b2531;border-radius:8px;padding:8px 4px}
+.c span{display:block;font-size:10px;color:#9fb0c3;letter-spacing:.5px}
+.c b{font-size:14px;font-weight:600}
+#st{margin-top:10px;font-size:12px}
+.chip{display:inline-block;padding:2px 8px;border-radius:10px;margin:2px;
+font-size:11px;background:#8b3a3a}
+.chip.on{background:#2f9e44}
+.chip.neu{background:#37506b}
+</style></head>
+<header><a href=/>&larr; Config</a><span>ACTITUD / IMU</span>
+<span id=age style="font-size:11px;color:#9fb0c3">—</span></header>
+<main>
+<canvas id=ah width=320 height=320></canvas>
+<div class=grid>
+<div class=c><span>ROLL °</span><b id=roll>—</b></div>
+<div class=c><span>PITCH °</span><b id=pitch>—</b></div>
+<div class=c><span>YAW °</span><b id=yaw>—</b></div>
+<div class=c><span>GYRO rad/s</span><b id=gyro>—</b></div>
+<div class=c><span>ACCEL g</span><b id=acc>—</b></div>
+<div class=c><span>MAG µT</span><b id=mag>—</b></div>
+<div class=c><span>BARO</span><b id=baro>—</b></div>
+<div class=c><span>GPS</span><b id=gps>—</b></div>
+<div class=c><span>SUPERF µs</span><b id=surf>—</b></div>
+</div>
+<div id=st>conectando…</div>
+</main><script>
+const cv=document.getElementById('ah'),ctx=cv.getContext('2d');
+const R2D=180/Math.PI;
+function ah(r,p){                       // roll, pitch in DEGREES
+ const W=cv.width,H=cv.height,mx=W/2,my=H/2,R=W/2,ppd=3.2;
+ ctx.save();ctx.beginPath();ctx.rect(0,0,W,H);ctx.clip();
+ ctx.translate(mx,my);ctx.rotate(-r/R2D);   // right bank -> horizon tilts
+ const dy=p*ppd;                            // nose up -> horizon drops
+ ctx.fillStyle='#3f7fcb';ctx.fillRect(-W*2,-H*2+dy,W*4,H*2);
+ ctx.fillStyle='#7a5230';ctx.fillRect(-W*2,dy,W*4,H*2);
+ ctx.strokeStyle='#fff';ctx.lineWidth=2;
+ ctx.beginPath();ctx.moveTo(-W*2,dy);ctx.lineTo(W*2,dy);ctx.stroke();
+ ctx.font='11px sans-serif';ctx.textAlign='center';ctx.fillStyle='#fff';
+ for(let d=-40;d<=40;d+=10){
+  if(d===0)continue;
+  const yy=dy-d*ppd,hw=(d%20===0)?36:20;
+  ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(-hw,yy);ctx.lineTo(hw,yy);
+  ctx.stroke();
+  ctx.fillText(Math.abs(d),hw+15,yy+4);
+  ctx.fillText(Math.abs(d),-hw-15,yy+4);
+ }
+ ctx.restore();
+ ctx.save();ctx.translate(mx,my);
+ // fixed bank scale
+ ctx.strokeStyle='#9fb0c3';ctx.lineWidth=2;
+ [-60,-45,-30,-20,-10,0,10,20,30,45,60].forEach(a=>{
+  const rad=(a-90)/R2D,l=(a%30===0)?13:8;
+  ctx.beginPath();
+  ctx.moveTo(Math.cos(rad)*(R-3),Math.sin(rad)*(R-3));
+  ctx.lineTo(Math.cos(rad)*(R-3-l),Math.sin(rad)*(R-3-l));
+  ctx.stroke();
+ });
+ // bank pointer: right bank -> swings right (clockwise)
+ ctx.rotate(r/R2D);ctx.fillStyle='#ffd433';
+ ctx.beginPath();ctx.moveTo(0,-R+18);ctx.lineTo(-7,-R+5);
+ ctx.lineTo(7,-R+5);ctx.closePath();ctx.fill();
+ ctx.restore();
+ // fixed aircraft symbol + rim
+ ctx.save();ctx.translate(mx,my);
+ ctx.strokeStyle='#ffd433';ctx.lineWidth=3;ctx.lineCap='round';
+ ctx.beginPath();ctx.moveTo(-70,0);ctx.lineTo(-22,0);ctx.lineTo(-13,9);
+ ctx.moveTo(70,0);ctx.lineTo(22,0);ctx.lineTo(13,9);ctx.stroke();
+ ctx.beginPath();ctx.arc(0,0,3.5,0,7);ctx.fillStyle='#ffd433';ctx.fill();
+ ctx.strokeStyle='#33445c';ctx.lineWidth=4;
+ ctx.beginPath();ctx.arc(0,0,R-2,0,7);ctx.stroke();
+ ctx.restore();
+}
+function chip(n,v,neu){return '<span class="chip '+
+ (neu?'neu':(v?'on':'off'))+'">'+n+'</span>'}
+let last=0;
+async function tick(){
+ try{
+  const d=await (await fetch('/api/live')).json();
+  if(d.live===false){st.textContent='esperando primera muestra…';return;}
+  ah(d.roll,d.pitch);
+  roll.textContent=d.roll.toFixed(1);
+  pitch.textContent=d.pitch.toFixed(1);
+  yaw.textContent=d.yaw.toFixed(1);
+  gyro.textContent=d.gx.toFixed(2)+' '+d.gy.toFixed(2)+' '+d.gz.toFixed(2);
+  acc.textContent=d.ax.toFixed(2)+' '+d.ay.toFixed(2)+' '+d.az.toFixed(2);
+  mag.textContent=d.mag_ok
+   ? d.mag.map(v=>v.toFixed(0)).join(' ') : 'no ok';
+  baro.textContent=(d.baro_pa/100).toFixed(1)+' hPa '+
+   d.baro_c.toFixed(0)+'°';
+  gps.textContent=d.fix
+   ? d.sv+'sv '+d.gps_v.toFixed(1)+' m/s' : 'sin fix';
+  surf.textContent=d.l_us+' '+d.r_us;
+  last=Date.now();
+  st.innerHTML=chip('ARMED',d.armed)+chip('RC',d.rc_ok)+
+   chip('PT',d.mode,true)+chip('MAG',d.mag_ok)+chip('FIX',d.fix)+
+   chip('PH'+d.phase,d.phase!==0,true)+
+   '<span class="chip neu">fs '+d.fs_evt+'</span>'+
+   '<span class="chip neu">ovr '+d.overruns+'</span>';
+  age.textContent='t='+d.t+' ms';
+ }catch(e){
+  st.innerHTML='<span class=chip>sin conexion</span>';age.textContent='—';
+ }
+}
+setInterval(tick,100);tick();
 </script></html>)HTML");
 }
 #endif
