@@ -94,7 +94,7 @@ void settings_defaults(Settings& s) {
 
     // --- wifi ---------------------------------------------------------------
     WifiSettings& w = s.wifi;
-    w.mode      = WIFI_MODE_AP;       // AP by default: always reachable
+    w.mode      = WIFI_CFG_MODE_AP;    // AP by default: always reachable
     w.ssid[0]   = 0;                  // filled by the portal on first boot
     w.pass[0]   = 0;
     strncpy(w.hostname, "wing-01", HOSTNAME_MAX);
@@ -210,7 +210,7 @@ int settings_validate(Settings& s) {
     fixed += clamp_f(rc.expo, 0.0f, 1.0f);
 
     WifiSettings& w = s.wifi;
-    if (w.mode > WIFI_MODE_STA) { w.mode = WIFI_MODE_AP; fixed++; }
+    if (w.mode > WIFI_CFG_MODE_STA) { w.mode = WIFI_CFG_MODE_AP; fixed++; }
     w.ssid[SSID_MAX]   = 0;
     w.pass[PASS_MAX]   = 0;
     w.hostname[HOSTNAME_MAX] = 0;

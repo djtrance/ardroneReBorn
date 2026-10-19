@@ -77,11 +77,14 @@ struct RcSettings {
 // ---------------------------------------------------------------------------
 // WiFi + configuration portal (checklist I5)
 // ---------------------------------------------------------------------------
-#define WIFI_MODE_AP        0           // always run an access point
-#define WIFI_MODE_STA       1           // join `ssid` if it works, else AP
+// NOTE: named WIFI_CFG_MODE_* on purpose — the ESP32 core's esp_wifi_types.h
+// defines an enum wifi_mode_t with WIFI_MODE_AP / WIFI_MODE_STA values, and a
+// macro with the same name breaks that header (`expected unqualified-id`).
+#define WIFI_CFG_MODE_AP    0           // always run an access point
+#define WIFI_CFG_MODE_STA   1           // join `ssid` if it works, else AP
 
 struct WifiSettings {
-    uint8_t  mode;                     // WIFI_MODE_*
+    uint8_t  mode;                     // WIFI_CFG_MODE_*
     char     ssid[SSID_MAX + 1];
     char     pass[PASS_MAX + 1];
     char     hostname[HOSTNAME_MAX + 1];

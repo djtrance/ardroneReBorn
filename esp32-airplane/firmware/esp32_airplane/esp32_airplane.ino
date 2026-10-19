@@ -174,7 +174,7 @@ static void rc_service(uint32_t now_ms) {
             if (ok) {
                 rc_map(g_rc_frame, g_set.rc, now_ms, g_rc);
                 g_rc_last_rx_ms = now_ms;
-                g_rc_ok = !g_rc.failsafe && !g_rc.frame_lost;
+                g_rc_ok = g_rc.ok;      // rc_map: !failsafe && !frame_lost
             } else {
                 // SBUS footer/header mismatch => we started mid-frame.
                 // Drop one byte and hunt for the real header.
@@ -404,7 +404,7 @@ static void log_udp_service() {
     if (s_udp.parsePacket() > 0) {       // any datagram subscribes the sender
         s_peer_ip   = s_udp.remoteIP();
         s_peer_port = s_udp.remotePort();
-        s_udp.flush();                   // payload itself is irrelevant
+        s_udp.clear();                    // payload itself is irrelevant
     }
 }
 
@@ -678,7 +678,7 @@ void loop() {
         // In passthrough (stage 1) guidance never drives the surfaces, so
         // don't even enter the phase: the mode switch stays inert.
         if (g_armed && !g_set.mix.passthrough &&
-            ph == Phase::ARMED_MANUAL &&
+            guidance_phase() == Phase::ARMED_MANUAL &&
             (g_rc.rth || g_rc.mode == 1)) {
             guidance_trigger_rth();
         }

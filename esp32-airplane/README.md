@@ -71,7 +71,8 @@ esp32-airplane/
         ├── failsafe.{h,cpp}      # failsafe FSM + preflight gate
         ├── logger.{h,cpp}        # real-time CSV log (I3): 39 cols @25 Hz, USB+UDP
         ├── mavlink.{h,cpp}       # MAVLink 2.0 GCS telemetry (I1): encode + RX
-        └── drivers/
+        ├── build_opt.h           # arduino-cli/IDE build flags (-DIMU_GY87)
+        ├── drivers/
             ├── imu_board.h       # board abstraction behind `#if IMU_GY91/GY87`
             ├── imu_gy91.cpp      # REAL: MPU9250 + AK8963 + BMP280
             ├── imu_gy87.cpp      # REAL: MPU6050 + HMC5883L + BMP180
@@ -79,6 +80,8 @@ esp32-airplane/
             ├── imu.{h,cpp}       # thin adapter over board_imu_*
             ├── sensors.{h,cpp}   # baro/mag dispatch + REAL GPS (C4); TFmini still STUB (C6)
             └── ld2450.{h,cpp}    # REAL: HLK-LD2450 frame parser + track matcher (C7)
+        └── src/
+            └── drv_*.cpp         # Arduino-only shims: one per drivers/*.cpp unit
 ```
 
 *LiDAR (C6) still emits a synthetic signal. Wire the real TFmini driver
@@ -90,13 +93,29 @@ before §C of the checklist is marked done.*
 cd esp32-airplane/firmware
 make test            # GY-91 (default)
 make test IMU=87     # GY-87
-# Arduino IDE  -> -DIMU_GY87 in build_opt.h
-# PlatformIO   -> build_flags = -DIMU_GY87
+# Arduino IDE / arduino-cli  -> build_opt.h next to the sketch (contains -DIMU_GY87)
+# PlatformIO                 -> build_flags = -DIMU_GY87
 ```
 
-Both board drivers are always *compiled* (the Arduino IDE builds every `.cpp`
-in the sketch folder); only one is active, and defining both or neither is a
-`#error`.
+Both board drivers are always *compiled* (each as its own translation unit);
+only one is active, and defining both or neither is a `#error`.
+
+### Build & flash the firmware (arduino-cli)
+
+```bash
+cd esp32-airplane/firmware
+arduino-cli compile --fqbn esp32:esp32:esp32 esp32_airplane
+arduino-cli upload  -p /dev/cu.usbserial-0001 --fqbn esp32:esp32:esp32 esp32_airplane
+# boot console / CSV log on USB:
+python3 -c "import serial,sys; s=serial.Serial('/dev/cu.usbserial-0001',115200,timeout=.5); [sys.stdout.buffer.write(s.read(4096)) for _ in range(40)]"
+```
+
+> **Note:** the Arduino builder only compiles sources in the sketch root and
+> under `src/` — `drivers/*.cpp` is *not* picked up on its own, which is what
+> the `src/drv_*.cpp` shims are for (one TU per driver, same split as the host
+> Makefile, so each file's `static`s stay private). Verified against core
+> `esp32:esp32 3.3.12` with 0 warnings; `WIFI_CFG_MODE_*` in `settings.h` is
+> named to avoid clashing with the core's `wifi_mode_t` enum.
 
 ### Run the tests
 

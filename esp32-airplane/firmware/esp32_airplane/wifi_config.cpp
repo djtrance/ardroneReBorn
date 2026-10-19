@@ -228,7 +228,7 @@ static void handle_factory() {
 static void wifi_start() {
     Settings& s = *s_cfg;
 
-    if (s.wifi.mode == WIFI_MODE_STA && s.wifi.ssid[0]) {
+    if (s.wifi.mode == WIFI_CFG_MODE_STA && s.wifi.ssid[0]) {
         WiFi.mode(WIFI_STA);
         WiFi.setHostname(s.wifi.hostname);
         WiFi.begin(s.wifi.ssid, s.wifi.pass);
