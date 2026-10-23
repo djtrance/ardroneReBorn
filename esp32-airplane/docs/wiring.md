@@ -21,7 +21,7 @@ graph LR
         RX35["GPIO35 RX (input-only)<br/>Radar"]
         ADC1["GPIO32 (ADC1)<br/>VBAT divider"]
         IO["GPIO2 LED · GPIO4 buzzer<br/>GPIO15 S.Port (phase 2)"]
-        SPI["GPIO5 CS / 18 SCK / 19 MISO / 23 MOSI<br/>reserved, unused (I2C in use)"]
+        SPI["GPIO18/19/23 (+5 CS)<br/>FREE — ideal para MAVLink mv_tx/mv_rx<br/>(SPI nunca se inicializa)"]
     end
 
     USB["PC / QGC<br/>via CP210x"] <--> U0
@@ -59,15 +59,15 @@ silkscreen of your board** — clones differ in order.
    EN   │  [ ] ESP32 DevKit            [ ] EN/RST  │
         │                                          │
  3V3    │  [ ] 3V3                         [ ] GND │
-  GND   │  [ ] GND                         [ ] 23  │
-        │  [ ] VP(36)                      [ ] 22  │
+  GND   │  [ ] GND                         [ ] 23 ◄│── LIBRE — MAVLink OK
+        │  [ ] VP(36)                      [ ] 22 ◄│── I2C SCL (IMU) — never
         │  [ ] VN(39)      UART0 ───►      [ ]  1 ◄│── CP210x RX  (USB)
   34 ◄  │  [ ] 34  ── LiDAR TX            [ ]  3 ◄│── CP210x TX  (USB)
   35 ◄  │  [ ] 35  ── radar TX            [ ] 21 ◄│── I2C SDA → IMU board
   32 ◄  │  [ ] 32  ── VBAT divider        [ ] GND │
-        │  [ ] 33                         [ ] 19  │ (SPI MISO, reserved)
-  25 ◄  │  [ ] 25  ── elevon L servo      [ ] 18  │ (SPI SCK,  reserved)
-  26 ◄  │  [ ] 26  ── elevon R servo      [ ]  5  │ (SPI CS,   reserved)
+  33 ◄  │  [ ] 33  ── LIBRE (MAVLink OK)  [ ] 19  │ libre (SPI no existe)
+  25 ◄  │  [ ] 25  ── elevon L servo      [ ] 18  │ libre (SPI no existe)
+  26 ◄  │  [ ] 26  ── elevon R servo      [ ]  5  │ strapping — dejar libre
   27 ◄  │  [ ] 27  ── ESC throttle        [ ] 17 ◄│── S.Port out (phase 2)
         │  [ ] 14 ◄│── GPS RX (ESP TX)     [ ] 16 ◄│── RC receiver SBUS/DATA
         │  [ ] 12                         [ ]  4 ◄│── buzzer
@@ -103,7 +103,10 @@ silkscreen of your board** — clones differ in order.
 | 32 | ADC | battery sense | divider from LiPo (B4 — value TODO, calibrate) |
 | 2  | out | status LED | keep series R ≥ 1 kΩ (strapping pin) |
 | 4  | out | buzzer | optional |
-| 5/18/19/23 | SPI | reserved | future SPI IMU — **unused today**, leave free |
+| 18/19/23 | SPI | **free** | `SPI.begin()` does not exist in the firmware — 18/19/23 are plain free GPIOs, **ideal for MAVLink `mv_tx`/`mv_rx`** (kept "reserved" only for a hypothetical SPI IMU) |
+| 5 | SPI CS | free, strapping | GPIO5 is a boot-strap pin — usable, but prefer 23/33 |
+| 33 | GPIO | **free** | unused anywhere — **ideal for MAVLink `mv_tx`/`mv_rx`** |
+| 36/39 | input-only | free | VP/VN — no pull-ups, **`mv_rx` only** (cannot transmit) |
 
 ---
 
@@ -257,9 +260,14 @@ graph LR
   `[mav] UART1/2 needs TX+RX pins` on the console. Recommended wiring so no
   harness changes: `mv_uart=1` → `mv_tx=14, mv_rx=13` (reuse the GPS wires);
   `mv_uart=2` → `mv_tx=17, mv_rx=16` (reuse the RC wires).
-- Any other free GPIO works too (e.g. 33/39) — but GPS/RC still die, so the
-  sensible use of uart1/2 is a **dedicated telemetry radio** (SiK/ELRS
-  telemetry) on its own connector.
+- **Which GPIOs to use?** The best dedicated-telemetry pins are **GPIO23**
+  and **GPIO33** (plus 18/19 — the "SPI" group is never initialized:
+  `SPI.begin()` does not exist in the firmware), or `GPIO36/39` for
+  `mv_rx` only (input-only). **Never GPIO21/22** — that is the IMU's I2C
+  bus (`Wire.begin(21,22)`): losing SCL means losing accel + baro, so the
+  aircraft can never arm. The GPS/RC conflict stands regardless of the pins
+  chosen, so uart1/2 makes sense as a **dedicated telemetry radio**
+  (SiK/ELRS telemetry) on its own connector.
 - `mv_baud` clamps 9600–921600 (default 57600); rate `mv_rate` 1–25 Hz;
   don't flip `mv_uart` while armed. QGC recipe:
   `docs/mavlink-telemetry.md`.
