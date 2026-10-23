@@ -44,7 +44,7 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 | Etapa-1 passthrough mode (T0) | ✅ RX→elevon mix direct, **default ON**, portal checkbox, persisted in NVS |
 | LD2450 frame parser + track matcher (C7) | ✅ real parser — **verify offsets vs firmware** |
 | GPS driver: u-blox 6 UART1 + NMEA/UBX (C4) | ✅ real driver — GGA/RMC @ 4 Hz, byte-stream parser + UBX config, tested |
-| Pin map (B2) | ✅ written into `config.h` — **still needs bench verification** |
+| Pin map (B2) | ✅ written into `config.h` + visualized in [`docs/wiring.md`](docs/wiring.md) — **still needs bench verification** |
 | IMU board abstraction (C1/C2/C3) | ✅ `#if`-selected **GY-91 / GY-87** drivers + calibration |
 | RC input: SBUS + Spektrum decode (H2) | ✅ decoders + mapping — **needs receiver bench check** |
 | Persisted settings + CRC (B/E5) | ✅ NVS-backed blob, validate/clamp on load |
@@ -128,7 +128,7 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
   - [ ] Flash size (MB): ______
   - [ ] PSRAM present? [ ] yes [ ] no
   - [ ] ADC pins available & not used by PWM: [ ] mapped
-- [x] **B2. Pin assignment (must be written down!)** — *draft in `config.h`, bench-verify*
+- [x] **B2. Pin assignment (must be written down!)** — *in `config.h`, visualized in `docs/wiring.md`, bench-verify*
 
   | Function | Bus | GPIO | Status |
   |----------|-----|------|--------|

@@ -19,7 +19,9 @@ algorithms developed for the AR.Drone 2.0 project.
 >    inertia, thrust curve, sign conventions)
 > 6. [`docs/mavlink-telemetry.md`](docs/mavlink-telemetry.md) — **MAVLink 2.0
 >    GCS link** on a configurable UART (QGC live view; golden-tested encoder)
-> 7. `firmware/esp32_airplane/` — starter firmware
+> 7. [`docs/wiring.md`](docs/wiring.md) — **how every device connects to the
+>    ESP32**: pinout drawing, bus diagrams, power tree, bench checklist
+> 8. `firmware/esp32_airplane/` — starter firmware
 
 ---
 
