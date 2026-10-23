@@ -86,12 +86,12 @@ silkscreen of your board** — clones differ in order.
 
 | GPIO | Dir | Function | Device / notes |
 |------|-----|----------|----------------|
-| 1  | TX | UART0 → CP210x RX | USB console, CSV log, MAVLink (`mv_uart=0`). **Do not attach anything else.** |
+| 1  | TX | UART0 → CP210x RX | USB console, CSV log, **MAVLink GCS when `mv_uart=0`** (`§5.6`). **Do not attach anything else.** |
 | 3  | RX | UART0 ← CP210x TX | same |
-| 13 | RX | UART1 ← GPS TX | u-blox NEO-6M NMEA/UBX @115200 after probe |
-| 14 | TX | UART1 → GPS RX | UBX-CFG-PRT baud change (never left muted) |
-| 16 | RX | UART2 ← receiver | SBUS (inverted) / Spektrum / FPort data |
-| 17 | TX | UART2 → receiver | S.Port telemetry out (phase 2) |
+| 13 | RX | UART1 ← GPS TX | u-blox NEO-6M NMEA/UBX @115200 after probe — *or* MAVLink `mv_uart=1`, `mv_rx=13` (GPS then disabled) |
+| 14 | TX | UART1 → GPS RX | UBX-CFG-PRT baud change (never left muted) — *or* MAVLink `mv_uart=1`, `mv_tx=14` |
+| 16 | RX | UART2 ← receiver | SBUS (inverted) / Spektrum / FPort data — *or* MAVLink `mv_uart=2`, `mv_rx=16` (RC then disabled) |
+| 17 | TX | UART2 → receiver | S.Port telemetry out (phase 2) — *or* MAVLink `mv_uart=2`, `mv_tx=17` |
 | 15 | TX | S.Port half-duplex | tie to RX17 side via **1N4148** — `docs/rc-and-telemetry.md` §3 |
 | 21 | I2C | SDA | IMU board (GY-87/GY-91), shared bus |
 | 22 | I2C | SCL | IMU board |
@@ -224,14 +224,60 @@ GPIO27 ──► ESC signal (white)          ESC + ◄── battery (3S)
 Both GPIOs are **input-only** (no pull-ups) — correct for RX-only links.
 LD2450 config (if ever needed) uses its own pads/AT mode, not GPIO35.
 
-### 5.6 UART0 — USB console / CSV / MAVLink
+### 5.6 Telemetry output pins — MAVLink (and MSP)
 
-Owned by the DevKit's CP210x. Boot banner, CSV logger and (optionally)
-MAVLink `mv_uart=0` share it. `mv_uart=0` moves the CSV logger to UDP
-(`capture.py --udp 192.168.4.1:5005`) so the loop never blocks on TX.
+Three exits exist; **MSP is not implemented** in this firmware (no pins
+assigned — if a GCS ever needs MSP, it would be a new encoder beside
+MAVLink on the same UART abstraction, checklist I1 extension).
 
-**Keep GPIO1/GPIO3 dedicated to USB.** (See the GPS finding in §5.2 — that is
-exactly what happens when something else joins this net.)
+**A. MAVLink 2.0 (I1)** — enable + pick the UART in the portal (`mv_en`,
+`mv_uart`, `mv_baud`, `mv_tx`, `mv_rx`):
+
+| `mv_uart` | Peripheral | TX | RX | Pins | What dies that session |
+|-----------|-----------|----|----|------|------------------------|
+| `0` (default) | UART0 | **GPIO1** | **GPIO3** | fixed (USB) | CSV serial → moves to UDP `:5005` |
+| `1` | UART1 | **`mv_tx` (required)** | **`mv_rx` (required)** | any GPIO | **GPS disabled** (`gps_init`/poll skipped) |
+| `2` | UART2 | **`mv_tx` (required)** | **`mv_rx` (required)** | any GPIO | **RC disabled → preflight blocks arming** |
+
+```mermaid
+graph LR
+    MV["MAVLink v2 stream<br/>portal mv_en=1"] --> Q{"mv_uart"}
+    Q -->|"0"| O0["UART0 · fixed<br/>GPIO1 TX / GPIO3 RX<br/>USB → QGC / QGC serial"]
+    Q -->|"1"| O1["UART1 · pins REQUIRED<br/>mv_tx / mv_rx (any GPIO)<br/>⚠ GPS off this session"]
+    Q -->|"2"| O2["UART2 · pins REQUIRED<br/>mv_tx / mv_rx (any GPIO)<br/>⚠ RC off → can't arm"]
+    O0 --> W0["CSV logger to UDP<br/>capture.py --udp"]
+    O1 --> W1["wire TX→GCS RX,<br/>common GND"]
+    O2 --> W2["RC receiver signal<br/>is unplugged"]
+```
+
+- **The conflict is the UART *peripheral*, not the GPIOs** — choosing
+  `mv_uart=1` takes `Serial1` from the GPS even if `mv_tx/mv_rx` point at
+  other pins; same for UART2 vs the RC link (`rc_uart_init()` is skipped).
+- **uart1/2 without pins = MAVLink stays OFF** with
+  `[mav] UART1/2 needs TX+RX pins` on the console. Recommended wiring so no
+  harness changes: `mv_uart=1` → `mv_tx=14, mv_rx=13` (reuse the GPS wires);
+  `mv_uart=2` → `mv_tx=17, mv_rx=16` (reuse the RC wires).
+- Any other free GPIO works too (e.g. 33/39) — but GPS/RC still die, so the
+  sensible use of uart1/2 is a **dedicated telemetry radio** (SiK/ELRS
+  telemetry) on its own connector.
+- `mv_baud` clamps 9600–921600 (default 57600); rate `mv_rate` 1–25 Hz;
+  don't flip `mv_uart` while armed. QGC recipe:
+  `docs/mavlink-telemetry.md`.
+
+**B. S.Port / FPort to the RC radio** — GPIO17 (+ GPIO15/1N4148
+half-duplex): the TX16S gets RSSI/voltage without a second cable
+(`docs/rc-and-telemetry.md` §3).
+
+**C. CSV log** — USB serial (or UDP `:5005` when MAVLink owns UART0), see
+`docs/test-campaign.md`.
+
+**Physical hookup for a wired GCS (A):**
+
+```
+ESP32 mv_tx ──────► GCS RX (e.g. FTDI/USB-serial adapter on the ground)
+ESP32 mv_rx ◄────── GCS TX
+ESP32 GND  ───────── GND          (common ground is mandatory)
+```
 
 ---
 
