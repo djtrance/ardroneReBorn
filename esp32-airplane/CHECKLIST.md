@@ -38,7 +38,7 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 | Geofence circle + altitude (G5) | ✅ implemented (independent layer) |
 | Failsafe FSM + preflight gate (H1/H6) | ✅ states + thresholds defined |
 | `config.h` parameter layer (E5) | ✅ all gains/limits centralized |
-| Host unit tests (J2 / E6) | ✅ **427 assertions**: 363 firmware (111 core + 199 config/RC/sensor/I2C + 53 MAVLink) + **64 wing-SIL (J1)** |
+| Host unit tests (J2 / E6) | ✅ **444 assertions**: 380 firmware (111 core + 216 config/RC/sensor/I2C + 53 MAVLink) + **64 wing-SIL (J1)** |
 | MAVLink telemetry over UART (I1) | ✅ v2 encoder + RX **golden-tested vs pymavlink**, portal `mv_*`, settings v7 — **needs a real GCS connect** (I4) |
 | Real-time CSV logger + ground tools (I3/I2) | ✅ 39-column CSV @25 Hz on USB + UDP:5005, host-tested formatter, `tools/wing_logger/{capture,plot}.py` |
 | Etapa-1 passthrough mode (T0) | ✅ RX→elevon mix direct, **default ON**, portal checkbox, persisted in NVS |
@@ -46,7 +46,7 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 | GPS driver: u-blox 6 UART1 + NMEA/UBX (C4) | ✅ real driver — GGA/RMC @ 4 Hz, byte-stream parser + UBX config, tested |
 | Pin map (B2) | ✅ written into `config.h` + visualized in [`docs/wiring.md`](docs/wiring.md) — **still needs bench verification** |
 | IMU board abstraction (C1/C2/C3) | ✅ `#if`-selected **GY-91 / GY-87** drivers + calibration |
-| RC input: SBUS + Spektrum decode (H2) | ✅ decoders + mapping — **needs receiver bench check** |
+| RC input: SBUS + Spektrum + PPM-SUM decode (H2) | ✅ UART decoders + GPIO33 PPM capture, timeout failsafe — **needs receiver bench check** |
 | Persisted settings + CRC (B/E5) | ✅ NVS-backed blob, validate/clamp on load |
 | WiFi config portal (I5/I4-lite) | ✅ HTTP form + JSON API, saves to NVS |
 | Telemetry research (I1) | 📄 `docs/rc-and-telemetry.md` — options A–E ranked |
@@ -144,6 +144,7 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
   | Current sensor (optional) | ADC1 | ____ | [ ] |
   | Status LED | GPIO | **2** | [x] defined |
   | RC input (SBUS / Spektrum) | UART2 | RX **16** / TX **17** | [x] defined |
+  | RC input (PPM-SUM) | GPIO interrupt | input **33** | [x] capture + decoder |
   | S.Port telemetry TX (reserved) | GPIO | **15** | [ ] phase 2 |
   | Buzzer (optional) | GPIO | **4** | [ ] not wired |
 
@@ -403,7 +404,8 @@ RTH · `P2` = required for autonomous phase 2 · `P3` = future / swarm
 - [ ] **H2. Link loss (RC)**
   - [x] Timeout: **800 ms** (`RC_LOSS_TIMEOUT_MS` in `config.h`, `rc.loss_timeout_ms` is a persisted setting)
   - [x] Which failsafe: FSM → RTH when GPS valid, glide when not (`failsafe_update`)
-  - [x] Decoders: SBUS 25 B (headers `0F/1B/2B`, footer `00`, frameLost/failsafe bits) + Spektrum 16 B (1024/2048 modes)
+  - [x] Decoders: SBUS 25 B (headers `0F/1B/2B`, footer `00`, frameLost/failsafe bits) + Spektrum 16 B (1024/2048 modes) + PPM-SUM GPIO33 (rising-edge intervals, 5–16 channels, 750–2250 µs, 3 ms sync)
+  - [x] PPM has no in-band failsafe flag; stopped-frame timeout uses `rc.loss_timeout_ms` (default 800 ms). Configure RX failsafe to disarm + minimum throttle.
   - [ ] Failsafe value injection tested with transmitter off in-flight sim: [ ]
   - [ ] Spektrum byte-2 status layout verified against a real receiver: [ ]
 - [ ] **H3. Battery**
@@ -581,12 +583,15 @@ Collecting items we don't want to lose but aren't blocking yet:
 | 2026-09-23 | **I1 (GCS)** | **MAVLink 2.0 telemetry over a configurable UART**: `mavlink.{h,cpp}` — v2 frame encoder with **zero-truncation**, CRC-16/MCRF4XX (skips the magic, includes `crc_extra`), 8 packers, RX state machine (early msgid/length gate + drop-to-magic resync + signed-frame drop) handling `REQUEST_DATA_STREAM` (rate clamped 1–25 Hz), 7-message scheduler (1 Hz group + fast group). **Output bytes byte-compared against `pymavlink` goldens** (HB×2, ATT, GPI, VFR-trim, GPS, SYS, SRV, TXT + inbound RDS). Settings **v6→v7** (`MavlinkSettings`: enable/uart/baud/rate/sysid/tx/rx with clamps), portal `mv_*` + JSON `"mav"`, `.ino` wiring (UART0 steals USB → CSV to UDP only; UART1 → GPS skipped; UART2 → RC skipped; `mav_uart_init()` last so its `begin()` owns pins). Docs: **`docs/mavlink-telemetry.md`** (frame rules, message table, RX state machine, UART conflict matrix, connect recipe; 4 Mermaid). **350 firmware tests** (111 + 186 + 53), both IMUs |
 | 2026-10-18 | **Build (GY-87)** | **Arduino build & first flash (core esp32:esp32 3.3.12)**: `WIFI_MODE_AP/STA` macros renamed `WIFI_CFG_MODE_*` (clashed with core `wifi_mode_t`); `src/drv_*.cpp` shims ×6 (Arduino builder only compiles sketch root + `src/` — `drivers/*.cpp` were silently unlinked; one TU per driver mirrors the host Makefile split); `build_opt.h` = `-DIMU_GY87` (reaches every compile unit via the `@build_opt.h` response file); `.ino` fixes (`g_rc.ok`, `guidance_phase()` instead of out-of-scope `ph`, `s_udp.clear()`). **Flashed to the real board, hash verified, boot confirmed** — IMU+baro+lidar up, CSV 25 Hz streaming |
 | 2026-10-19 | **mag / T0** | **`mag=0` diagnosed on real hardware + live attitude portal**: new `i2c_scan.{h,cpp}` — bus walker + known-part ID reader (MPU `0x75`, HMC `0x0A..0x0C`→"H433", QMC `0x0D`, BMP `0xD0`) with a **pure host-tested JSON formatter**; printed once at boot and served at `GET /api/i2c` (refused while armed). Result on this board: `{"addrs":[0x68,0x77],"mpu":"68","hmc":null,"qmc":null,"bmp":"55"}` — **neither HMC5883L (0x1E) nor QMC clone (0x0D) ACKs: the mag chip is absent/dead (hardware)**. Escape hatch: `CFG_USE_MAG` now `#ifndef`-overridable and `build_opt.h` sets `-DCFG_USE_MAG=0` → heading falls back to GPS course, preflight mag gate satisfied. **Live portal**: `wifi_config_publish()` hands the 39-col `LogSample` + mag vector to `GET /api/live` (JSON, ~34 keys) and a new **`/attitude` page — canvas artificial horizon + raw-IMU readouts** (roll/pitch/yaw, gyro, accel, mag µT, baro, GPS, surfaces, status chips) polled at 10 Hz; button on the index. **Verified on hardware**: all endpoints 200, `/api/live` `t` advances between polls, `/attitude` served **byte-identical** to the page browser-tested against a mock (0 console errors). Also diagnosed: **GPS module alive (NMEA fresh) but its TX lands on the USB/UART0 net** (visible only during reset windows when the ESP32 is high-Z) — `gps=0@9600` because UART1 (GPIO13) sees nothing → **move GPS TX → GPIO13**. **363 firmware tests** (111 + 199 + 53), both IMUs |
+| 2026-10-29 | **H2 / I1 — PPM** | **PPM-SUM RC input implemented on GPIO33**: rising-edge ISR captures a full frame and atomically publishes it to the loop; pure `ppm_decode()` validates 5–16 channels, 750–2250 µs channel intervals, fills absent channels to center, rejects malformed frames; `rc_map()` rejects frames shorter than any mapped channel; existing RC timeout applies. Portal option `PPM-SUM (GPIO33)`, NVS enum value `RC_PROTO_PPM=3`; `SETTINGS_VERSION` unchanged (no struct-layout change). **UART2 can now carry MAVLink at the same time** (`mv_uart=2`, suggested `mv_tx=23`, `mv_rx=18`) while PPM remains on GPIO33; SBUS/Spektrum still conflict with UART2 as before. PPM has no in-band failsafe bit — RX must output disarm/min-throttle on signal loss; timeout only detects a stopped pulse train. **Host tests 380 firmware** (111 + 216 + 53), both IMUs; receiver bench validation still open (H2). |
 
-> **Next iteration target**: **mag diagnosed (absent chip, flown around with
-> `CFG_USE_MAG=0`), live attitude portal done** (363 firmware tests / 427
-> with the wing SIL). Next: **rewire GPS TX → GPIO13** (it currently lands on
-> the USB/UART0 net — should light up `gps=1@115200`), then **connect a real
-> QGC** (I4) with `mv_uart=0`, then **C6 LiDAR** (last §C stub) + **F6 wind
+> **Next iteration target**: **PPM driver landed, receiver bench validation
+> pending** (380 firmware tests / 444 with the wing SIL). Next: validate PPM
+> pulse polarity/channel order and failsafe values with the actual receiver
+> (props off); test MAVLink `mv_uart=2` simultaneously on GPIO23/18. Also
+> **rewire GPS TX → GPIO13** (it currently lands on the USB/UART0 net — should
+> light up `gps=1@115200`), then **connect a real QGC** (I4) with `mv_uart=0`,
+> then **C6 LiDAR** (last §C stub) + **F6 wind
 > classifier** (design ready in `docs/test-campaign.md` §5 — code it pure and
 > host-test it against synthetic log rows) + **§B/B3 bench** with the T0
 > checklist (`docs/test-campaign.md` §2). When the wing arrives: run the §A

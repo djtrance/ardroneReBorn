@@ -34,6 +34,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFiUdp.h>
+#include <freertos/FreeRTOS.h>
 
 // ---------------------------------------------------------------------------
 // Shared state (single writer per field; guarded where crossed)
@@ -46,7 +47,8 @@ static bool         g_rc_ok = false;
 
 // MAVLink (I1) borrows one of the three UARTs when enabled in the portal;
 // these report whether it currently owns a given one. UART0 = USB (shared
-// with the CSV logger), UART1 = GPS, UART2 = RC receiver.
+// with the CSV logger), UART1 = GPS, UART2 = serial RC or MAVLink; PPM is a
+// GPIO interrupt input and remains independent when MAVLink uses UART2.
 static bool mav_owns_uart(uint8_t u) {
     return g_set.mav.enable && g_set.mav.uart == u;
 }
@@ -113,16 +115,107 @@ static void pwm_output(const ElevonOut& o) {
 }
 
 // ---------------------------------------------------------------------------
-// RC input (checklist H2) — SBUS or Spektrum satellite, selected at runtime
-// through Settings.rc.proto and persisted across power-off.
+// RC input (checklist H2) — SBUS/Spektrum over UART2 or PPM-SUM on GPIO33,
+// selected at runtime through Settings.rc.proto and persisted in NVS.
 // ---------------------------------------------------------------------------
 static uint8_t s_rc_buf[64];
 static uint8_t s_rc_len = 0;
 
+// PPM capture runs in the GPIO ISR. The ISR writes a private work frame and
+// publishes only completed frames under this short cross-core critical section.
+static portMUX_TYPE s_ppm_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t s_ppm_last_edge_us = 0;
+static volatile uint16_t s_ppm_work[RC_MAX_CH];
+static volatile uint8_t  s_ppm_work_count = 0;
+static volatile uint16_t s_ppm_pending[RC_MAX_CH];
+static volatile uint8_t  s_ppm_pending_count = 0;
+static volatile bool     s_ppm_frame_ready = false;
+
+static bool rc_uses_ppm() { return g_set.rc.proto == RC_PROTO_PPM; }
+static bool rc_uses_uart() {
+    return g_set.rc.proto == RC_PROTO_SBUS ||
+           g_set.rc.proto == RC_PROTO_SPEKTRUM;
+}
+static bool rc_uart_blocked_by_mav() {
+    return rc_uses_uart() && mav_owns_uart(2);
+}
+
+static void IRAM_ATTR ppm_edge_isr() {
+    const uint32_t now = (uint32_t)micros();
+    const uint32_t dt = now - s_ppm_last_edge_us;  // wrap-safe unsigned delta
+    s_ppm_last_edge_us = now;
+
+    if (dt >= PPM_SYNC_GAP_US) {
+        const uint8_t count = s_ppm_work_count;
+        if (dt <= PPM_SYNC_MAX_US && count >= PPM_MIN_CHANNELS &&
+            count <= RC_MAX_CH) {
+            portENTER_CRITICAL_ISR(&s_ppm_mux);
+            for (uint8_t i = 0; i < count; i++)
+                s_ppm_pending[i] = s_ppm_work[i];
+            s_ppm_pending_count = count;
+            s_ppm_frame_ready = true;
+            portEXIT_CRITICAL_ISR(&s_ppm_mux);
+        }
+        s_ppm_work_count = 0;
+        return;
+    }
+
+    if (s_ppm_work_count == 0xFF) return;     // bad/oversized frame until sync
+    if (dt < PPM_CHANNEL_MIN_US || dt > PPM_CHANNEL_MAX_US ||
+        s_ppm_work_count >= RC_MAX_CH) {
+        s_ppm_work_count = 0xFF;               // reject entire frame
+        return;
+    }
+    const uint8_t index = s_ppm_work_count;
+    s_ppm_work[index] = (uint16_t)dt;
+    s_ppm_work_count = (uint8_t)(index + 1u);
+}
+
+static void ppm_capture_init() {
+    detachInterrupt(digitalPinToInterrupt(PIN_RC_PPM));
+    s_ppm_last_edge_us = 0;
+    s_ppm_work_count = 0;
+    s_ppm_pending_count = 0;
+    s_ppm_frame_ready = false;
+    pinMode(PIN_RC_PPM, INPUT);
+    attachInterrupt(digitalPinToInterrupt(PIN_RC_PPM), ppm_edge_isr, RISING);
+}
+
+static bool ppm_take_frame(uint16_t* widths, uint8_t& count) {
+    bool ready = false;
+    portENTER_CRITICAL(&s_ppm_mux);
+    if (s_ppm_frame_ready) {
+        count = s_ppm_pending_count;
+        for (uint8_t i = 0; i < count; i++) widths[i] = s_ppm_pending[i];
+        s_ppm_frame_ready = false;
+        ready = true;
+    }
+    portEXIT_CRITICAL(&s_ppm_mux);
+    return ready;
+}
+
 static void rc_uart_init() {
+    detachInterrupt(digitalPinToInterrupt(PIN_RC_PPM));
+    s_ppm_work_count = 0;
+    s_ppm_frame_ready = false;
     rc_input_defaults(g_rc);
+    rc_frame_clear(g_rc_frame);
+    g_rc_last_rx_ms = millis();
+    g_rc_ok = false;
     if (g_set.rc.proto == RC_PROTO_NONE) {
         Serial.println(F("[rc] disabled (RC_PROTO_NONE)"));
+        return;
+    }
+    if (rc_uses_ppm()) {
+        ppm_capture_init();
+        s_rc_len = 0;
+        Serial.printf("[rc] PPM-SUM on GPIO%d, rising-edge, %u..%u us, sync >=%u us\n",
+                      PIN_RC_PPM, PPM_CHANNEL_MIN_US, PPM_CHANNEL_MAX_US,
+                      PPM_SYNC_GAP_US);
+        return;
+    }
+    if (mav_owns_uart(2)) {
+        Serial.println(F("[rc] UART receiver skipped — UART2 owned by MAVLink"));
         return;
     }
     bool spek = (g_set.rc.proto == RC_PROTO_SPEKTRUM);
@@ -153,9 +246,30 @@ static void rc_uart_init() {
 }
 
 static void rc_service(uint32_t now_ms) {
-    // UART2 taken by MAVLink (portal) => no receiver in sight; report loss
-    // instead of stealing the telemetry bytes.
-    if (g_set.rc.proto == RC_PROTO_NONE || mav_owns_uart(2)) {
+    if (g_set.rc.proto == RC_PROTO_NONE) {
+        g_rc_ok = false;
+        return;
+    }
+
+    if (rc_uses_ppm()) {
+        uint16_t widths[RC_MAX_CH];
+        uint8_t count = 0;
+        if (ppm_take_frame(widths, count) && ppm_decode(widths, count, g_rc_frame)) {
+            if (rc_map(g_rc_frame, g_set.rc, now_ms, g_rc)) {
+                g_rc_last_rx_ms = now_ms;
+                g_rc_ok = g_rc.ok;
+            } else {
+                g_rc_ok = false;           // configured channel absent from frame
+            }
+        }
+        if ((int32_t)(now_ms - g_rc_last_rx_ms) >
+            (int32_t)g_set.rc.loss_timeout_ms) g_rc_ok = false;
+        return;
+    }
+
+    // UART2 taken by MAVLink => serial receiver is unavailable. PPM is handled
+    // above on GPIO33 and remains independent of UART2 ownership.
+    if (rc_uart_blocked_by_mav()) {
         g_rc_ok = false;
         return;
     }
@@ -203,8 +317,7 @@ static void rc_service(uint32_t now_ms) {
 //
 //   UART0 (USB): shares the port with the CSV logger -> CSV moves to UDP
 //   UART1       : GPS is disabled for the session (gps_init/poll skipped)
-//   UART2       : RC is disabled for the session (rc_service skipped, which
-//                 also means preflight fails and the arm switch goes dead)
+//   UART2       : SBUS/Spektrum RC is disabled; PPM on GPIO33 remains active
 // ---------------------------------------------------------------------------
 static MavlinkRx       s_mav_rx;
 static MavlinkSchedule s_mav_sched;
@@ -373,9 +486,9 @@ static void mav_service(uint32_t now_ms) {
 // wifi_config so a trim/servo change lands on the next control tick.
 static void on_settings_changed(Settings& s) {
     mixing_load(&s.mix);
-    // RC protocol or UART settings changed -> reopen the port, unless
-    // MAVLink is holding UART2 this session.
-    if (!mav_owns_uart(2)) rc_uart_init();
+    // RC protocol/UART changed: reconfigure the GPIO capture or serial input.
+    // PPM is independent of UART2; SBUS/Spektrum are skipped when MAVLink owns it.
+    rc_uart_init();
     // GPS: bring it up if it was skipped at boot because MAVLink had UART1,
     // or mark it down if MAVLink is about to take the port.
     if (mav_owns_uart(1)) {
@@ -490,12 +603,7 @@ void setup() {
 
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     pwm_init();
-    if (mav_owns_uart(2)) {
-        rc_input_defaults(g_rc);
-        Serial.println(F("[rc] skipped — UART2 owned by MAVLink"));
-    } else {
-        rc_uart_init();
-    }
+    rc_uart_init();                  // PPM stays on GPIO33 even if UART2 is borrowed
 
     ahrs_init();
     control_init();

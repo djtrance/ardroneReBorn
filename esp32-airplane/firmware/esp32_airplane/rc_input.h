@@ -1,4 +1,4 @@
-// rc_input.h — SBUS + Spektrum satellite decoders  (checklist H2, phase 1 RC)
+// rc_input.h — SBUS + Spektrum + PPM-SUM decoders (checklist H2, phase 1 RC)
 //
 // First flight stage is flown on RC only, so this path must be solid and it
 // must be independent of GPS/vision. Two wire protocols are supported and
@@ -6,6 +6,8 @@
 //
 //   SBUS        100000 baud, 8E2, inverted, 25-byte frame, 16 channels
 //   Spektrum    115200 baud, 8N1, 16-byte frame, 6 channels per frame
+//   PPM-SUM     rising-edge intervals, 5..16 channels, 750..2250 us/channel;
+//               frame sync is an interval >= 3000 us (captured by GPIO ISR)
 //
 // Both decoders are pure functions over a byte buffer so they can be unit
 // tested on the host with captured/replayed frames (checklist J2).
@@ -20,6 +22,11 @@
 
 #define SBUS_FRAME_LEN      25
 #define SPEKTRUM_FRAME_LEN  16
+#define PPM_MIN_CHANNELS    5
+#define PPM_CHANNEL_MIN_US  750
+#define PPM_CHANNEL_MAX_US  2250
+#define PPM_SYNC_GAP_US     3000
+#define PPM_SYNC_MAX_US     30000
 #define SBUS_BAUD           100000
 #define SPEKTRUM_BAUD       115200
 
@@ -44,6 +51,11 @@ void rc_frame_clear(RcFrame& f);
 // Decode a complete frame. Return false (and leave `out` cleared) on garbage.
 bool sbus_decode(const uint8_t* buf, RcFrame& out);
 bool spektrum_decode(const uint8_t* buf, RcFrame& out);
+
+// Decode channel intervals captured between successive PPM rising edges.
+// `count` is the number of intervals in the frame (sync gap excluded).
+// Missing channels are initialized to the PPM center (1500 us).
+bool ppm_decode(const uint16_t* widths_us, uint8_t count, RcFrame& out);
 
 // ---------------------------------------------------------------------------
 // Normalised pilot sticks after channel mapping, inversion, deadband, expo.

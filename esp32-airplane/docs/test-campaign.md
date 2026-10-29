@@ -59,7 +59,7 @@ sequenceDiagram
 | Grupo | Columnas | Qué valida / para qué |
 |---|---|---|
 | Tiempo/estado | `t_ms, mode, armed, rc_ok, phase, fs_evt, env, wind` | `mode 1` = passthrough; `env` bits: 1 stall, 2 banca, 4 VNE, 5 g; `wind` = clase T3 (0 hasta F6) |
-| Mando | `rc_p, rc_r, rc_t, rc_y` (normalizado) + `raw_p, raw_r, raw_t, raw_y` (unidades del protocolo) | T0: curvas/expo del TX, endpoints, deadband. `raw` SBUS 172..1811, Spektrum 0..1023 |
+| Mando | `rc_p, rc_r, rc_t, rc_y` (normalizado) + `raw_p, raw_r, raw_t, raw_y` (unidades del protocolo) | T0: curvas/expo del TX, endpoints, deadband. `raw` SBUS 172..1811, Spektrum 0..1023, PPM ≈1000..2000 µs |
 | IMU | `ax, ay, az` (g), `gx, gy, gz` (rad/s) | T3 turbulencia, detector de stall (nose-drop en `gy`), M7 signos |
 | Barómetro | `baro_pa, baro_c` | T3 aire vertical, caídas rápidas |
 | Actitud | `roll, pitch, yaw` (°) | M7 signos, banca en patrón de T2 |
@@ -110,7 +110,8 @@ El **expo/curvas de mando se configuran en el TX** (no en la placa).
 - ☑ **Passthrough etapa 1** (default ya ON — settings `mix.passthrough`).
 - `expo` del portal = **0** si las curvas las haces en el TX (no duplicar expo).
 - Canales `ch_p/ch_r/ch_t/ch_y` = mapeo AETR de tu TX (por defecto 1/0/2/3).
-- Protocolo: SBUS (default) o Spektrum; `sbus_inv` casi seguro marcado.
+- Protocolo: SBUS (default), Spektrum o PPM-SUM (GPIO33); `sbus_inv` solo
+  afecta SBUS. PPM acepta 5–16 canales y no tiene flag failsafe en banda.
 
 ```mermaid
 flowchart TD

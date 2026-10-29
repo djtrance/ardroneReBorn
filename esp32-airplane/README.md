@@ -9,7 +9,7 @@ algorithms developed for the AR.Drone 2.0 project.
 > 2. [`docs/algorithm-mapping.md`](docs/algorithm-mapping.md) — which
 >    AR.Drone algorithms transfer, which are rewritten, which are dropped
 > 3. [`docs/rc-and-telemetry.md`](docs/rc-and-telemetry.md) — how RC input and
->    telemetry reach a **Radiomaster TX16S MKII (4in1)** (SBUS/Spektrum in,
+>    telemetry reach a **Radiomaster TX16S MKII (4in1)** (SBUS/Spektrum/PPM in,
 >    S.Port/FPort out — SBUS itself is strictly one-way)
 > 4. [`docs/test-campaign.md`](docs/test-campaign.md) — **real-time logger +
 >    graphical test campaign**: T0 bench (RX→2-servo mix), T1 glide, T2 GPS
@@ -34,7 +34,7 @@ algorithms developed for the AR.Drone 2.0 project.
 | Phase 1 autonomy | **Estabilización + RTH** |
 | Phase 2 autonomy | Vuelo autónomo con cámara + LiDAR + radar |
 | Propulsion | **Eléctrico + ESC (throttle PWM)** |
-| RC input | **SBUS o Spektrum** (UART2, elegido y persistido por runtime) |
+| RC input | **SBUS/Spektrum por UART2 o PPM-SUM por GPIO33** (seleccionado y persistido por runtime) |
 | IMU board | **GY-91** (MPU9250+BMP280) o **GY-87** (MPU6050+HMC5883L+BMP180) — `#if` en tiempo de compilación |
 | Configuration | **WiFi portal** (STA→AP `wing-%04X`), guardado en NVS con CRC |
 
@@ -48,22 +48,23 @@ esp32-airplane/
 ├── CHECKLIST.md                  # ★ iterative definition checklist
 ├── docs/
 │   ├── algorithm-mapping.md      # AR.Drone → wing algorithm transfer matrix
-│   ├── rc-and-telemetry.md       # RC in (SBUS/Spektrum) + telemetry out (TX16S)
+│   ├── rc-and-telemetry.md       # RC in + telemetry out (TX16S)
 │   ├── airframe-measurements.md  # ★ §A sheet: measure the physical wing (formulas)
 │   ├── test-campaign.md          # ★ logger tutorial + T0..T3 test campaign
-│   └── mavlink-telemetry.md      # MAVLink 2.0 GCS link on a configurable UART
+│   ├── mavlink-telemetry.md      # MAVLink 2.0 GCS link on a configurable UART
+│   └── wiring.md                 # visual pinout, power tree, bus + T0 wiring
 └── firmware/
-    ├── Makefile                  # `make test` → 363 host unit tests
+    ├── Makefile                  # `make test` → 380 host unit tests
     │                             # `make test IMU=87` → GY-87 board instead
     ├── tests/
     │   ├── test_wing_core.cpp    # J2: mixing, envelope, L1, RTH, NMEA, LD2450, AHRS, failsafe (111)
-    │   ├── test_rc_settings.cpp  # settings/CRC, SBUS+Spektrum, sensor math, logger CSV (186)
+    │   ├── test_rc_settings.cpp  # settings/CRC, SBUS+Spektrum+PPM, sensors, logger CSV (216)
     │   └── test_mavlink.cpp      # MAVLink frames vs pymavlink goldens + RX + scheduler (53)
     └── esp32_airplane/
         ├── esp32_airplane.ino    # entry point: setup/loop, fixed-rate slots, PWM, RC
         ├── config.h              # gains, limits, pin map, compile-time IMU select
         ├── settings.{h,cpp}      # persisted Settings blob (magic/version/CRC/NVS)
-        ├── rc_input.{h,cpp}      # SBUS + Spektrum decode, channel map, expo, arm
+        ├── rc_input.{h,cpp}      # SBUS + Spektrum + PPM decode, channel map, expo, arm
         ├── wifi_config.{h,cpp}   # ESP32 HTTP config portal (I5)
         ├── ahrs.{h,cpp}          # gyro+accel+mag fusion (complementary)
         ├── control.{h,cpp}       # ADRC/PID loops + envelope protection + b0 ∝ q
@@ -122,9 +123,9 @@ python3 -c "import serial,sys; s=serial.Serial('/dev/cu.usbserial-0001',115200,t
 ### Run the tests
 
 ```bash
-cd esp32-airplane/firmware && make test      # 363 assertions
+cd esp32-airplane/firmware && make test      # 380 assertions
 # or from the repo-wide suite:
-cd tools/simulator && make check             # quad (90) + wing (363) + wing SIL (64)
+cd tools/simulator && make check             # quad (90) + wing (380) + wing SIL (64)
 ```
 
 ### Real-time log (checklist I3)

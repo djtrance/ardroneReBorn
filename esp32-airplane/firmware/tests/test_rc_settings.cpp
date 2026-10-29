@@ -3,7 +3,7 @@
 // time" requirement.
 //
 //   settings     blob codec (magic/version/size/CRC16), clamping, NVS stub
-//   rc_input     SBUS + Spektrum frame decode, channel map, expo, arm switch
+//   rc_input     SBUS + Spektrum + PPM frame decode, channel map, expo, arm switch
 //   sensor_math  MPU/HMC/AK8963 scaling + BMP180/BMP280 datasheet vectors
 //   mixing       runtime trim / span / reverse driven by Settings
 //   gps          u-blox 6 NMEA byte stream + UBX CFG-RATE/CFG-MSG packets
@@ -125,6 +125,17 @@ static void test_settings_proto_defaults() {
     ck(rc.min_raw == 0 && rc.mid_raw == 512 && rc.max_raw == 1023,
        "Spektrum 1024-domain range 0/512/1023");
     ck(rc.loss_timeout_ms == RC_LOSS_TIMEOUT_MS, "loss timeout from config.h");
+
+    rc.proto = RC_PROTO_PPM;
+    rc_apply_proto_defaults(rc);
+    ck(rc.min_raw == 1000 && rc.mid_raw == 1500 && rc.max_raw == 2000,
+       "PPM stick range 1000/1500/2000 us");
+    Settings ppm_settings;
+    settings_defaults(ppm_settings);
+    ppm_settings.rc.proto = RC_PROTO_PPM;
+    ck(settings_validate(ppm_settings) == 0 &&
+       ppm_settings.rc.proto == RC_PROTO_PPM,
+       "PPM protocol is retained by settings validation");
 
     rc.proto = RC_PROTO_NONE;
     rc_apply_proto_defaults(rc);
@@ -249,6 +260,51 @@ static void test_spektrum_decode() {
 // ===========================================================================
 // 4. Channel mapping / normalisation
 // ===========================================================================
+static void test_ppm_decode() {
+    printf("[rc ppm]\n");
+    const uint16_t widths[7] = {1000, 2000, 1500, 1750, 1000, 750, 2250};
+    RcFrame f;
+    ck(ppm_decode(widths, 7, f), "valid 7-channel PPM frame accepted");
+    ck(f.frame_ok && f.count == 7, "PPM frame marked valid with channel count");
+    ck(f.raw[0] == 1000 && f.raw[1] == 2000 && f.raw[3] == 1750,
+       "PPM intervals copied as microseconds");
+    ck(f.raw[7] == 1500 && f.raw[15] == 1500,
+       "channels absent from frame centered safely");
+    ck(!f.failsafe && !f.frame_lost, "PPM flags remain clear (timeout is failsafe)");
+
+    const uint16_t min_channels[PPM_MIN_CHANNELS] = {1000,1500,2000,1500,1000};
+    ck(ppm_decode(min_channels, PPM_MIN_CHANNELS, f), "minimum 5 channels accepted");
+    ck(!ppm_decode(widths, PPM_MIN_CHANNELS - 1, f), "fewer than 5 channels rejected");
+    ck(!f.frame_ok, "rejected PPM frame leaves output invalid");
+    ck(!ppm_decode(nullptr, 7, f), "null PPM intervals rejected");
+
+    uint16_t bad[7] = {1000,2000,1500,1750,1000,750,2251};
+    ck(!ppm_decode(bad, 7, f), "interval above maximum rejected");
+    bad[6] = 749;
+    ck(!ppm_decode(bad, 7, f), "interval below minimum rejected");
+
+    uint16_t too_many[RC_MAX_CH + 1] = {};
+    ck(!ppm_decode(too_many, RC_MAX_CH + 1, f), "more than 16 channels rejected");
+
+    RcSettings rc;
+    memset(&rc, 0, sizeof(rc));
+    rc.proto = RC_PROTO_PPM;
+    rc_apply_proto_defaults(rc);
+    rc.ch_roll = 0; rc.ch_pitch = 1; rc.ch_throttle = 2; rc.ch_yaw = 3;
+    rc.ch_arm = 4; rc.ch_rth = 0xFF; rc.ch_flightmode = 0xFF;
+    rc.arm_high_is_armed = 1;
+    RcInput in;
+    const uint16_t flight_channels[PPM_MIN_CHANNELS] = {2000,2000,1000,1500,2000};
+    ck(ppm_decode(flight_channels, PPM_MIN_CHANNELS, f) &&
+       rc_map(f, rc, 100, in), "PPM frame maps through common RC path");
+    ck(near(in.roll, 1.0, 1e-6) && near(in.pitch, 1.0, 1e-6) &&
+       near(in.throttle, 0.0, 1e-6) && in.arm,
+       "PPM stick endpoints and arm switch normalized correctly");
+    rc.ch_flightmode = 6;
+    ck(!rc_map(f, rc, 101, in),
+       "PPM rejects frame shorter than a configured channel mapping");
+}
+
 static void test_rc_mapping() {
     printf("[rc mapping]\n");
 
@@ -880,6 +936,7 @@ int main() {
     test_settings_proto_defaults();
     test_sbus_decode();
     test_spektrum_decode();
+    test_ppm_decode();
     test_rc_mapping();
     test_sensor_math();
     test_gps_ublox6();

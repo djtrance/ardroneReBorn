@@ -135,6 +135,38 @@ bool spektrum_decode(const uint8_t* buf, RcFrame& out) {
     return true;
 }
 
+// ==========================================================================
+// PPM-SUM — one pulse train, channels encoded by rising-edge intervals.
+// The GPIO ISR detects the long frame-sync gap and passes only channel
+// intervals here. This pure decoder rejects incomplete/implausible frames so
+// it can be host-tested independently of the ESP32 interrupt hardware.
+// ==========================================================================
+bool ppm_decode(const uint16_t* widths_us, uint8_t count, RcFrame& out) {
+    uint32_t t0 = RC_NOW_US();
+    rc_frame_clear(out);
+    if (!widths_us || count < PPM_MIN_CHANNELS || count > RC_MAX_CH)
+        return false;
+
+    // Center missing channels: an unassigned arm channel therefore cannot
+    // become asserted just because the receiver sends fewer than 16 channels.
+    for (uint8_t i = 0; i < RC_MAX_CH; i++) out.raw[i] = 1500;
+    for (uint8_t i = 0; i < count; i++) {
+        if (widths_us[i] < PPM_CHANNEL_MIN_US ||
+            widths_us[i] > PPM_CHANNEL_MAX_US) {
+            rc_frame_clear(out);
+            return false;
+        }
+        out.raw[i] = widths_us[i];
+    }
+
+    out.count = count;
+    out.frame_ok = true;
+    out.failsafe = false;       // PPM has no in-band failsafe flag; timeout only
+    out.frame_lost = false;
+    s_last_decode_us = RC_NOW_US() - t0;
+    return true;
+}
+
 // ===========================================================================
 // Mapping + normalisation
 // ===========================================================================
@@ -178,6 +210,19 @@ static inline uint8_t switch_pos(uint16_t raw, const RcSettings& rc) {
 
 bool rc_map(const RcFrame& f, const RcSettings& rc, uint32_t now_ms, RcInput& in) {
     if (!f.frame_ok) return false;
+
+    // PPM frames are sequential; unlike SBUS, a short frame really has no
+    // higher-numbered channels. Never treat a missing mapped switch as a
+    // centered (or potentially armed) value. Spektrum is sparse by channel ID
+    // and therefore intentionally does not use this count check.
+    if (rc.proto == RC_PROTO_PPM) {
+        const uint8_t mapped[] = {rc.ch_pitch, rc.ch_roll, rc.ch_throttle,
+                                  rc.ch_yaw, rc.ch_arm, rc.ch_rth,
+                                  rc.ch_flightmode};
+        for (size_t i = 0; i < sizeof(mapped); i++) {
+            if (mapped[i] != 0xFF && mapped[i] >= f.count) return false;
+        }
+    }
 
     auto get = [&](uint8_t ch) -> uint16_t {
         if (ch == 0xFF || ch >= RC_MAX_CH) return rc.mid_raw;

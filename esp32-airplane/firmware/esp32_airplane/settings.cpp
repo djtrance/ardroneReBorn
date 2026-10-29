@@ -26,6 +26,7 @@ static const size_t kCrcOffset = offsetof(Settings, crc);
 //   SBUS        172 .. 1811 raw  (988 .. 2012 us), centre 992
 //   Spektrum 1024    0 .. 1023  raw (903 .. 2095 us), centre 512
 //   Spektrum 2048    0 .. 2047  raw (903 .. 2095 us), centre 1024
+//   PPM-SUM  1000 .. 2000 us, centre 1500
 // The 1024/2048 distinction is discovered per-frame (Spektrum bit 0), so the
 // decoder normalises to the 10-bit domain first and we keep 1024 here.
 // ---------------------------------------------------------------------------
@@ -42,6 +43,12 @@ void rc_apply_proto_defaults(RcSettings& rc) {
             rc.mid_raw      = 512;
             rc.max_raw      = 1023;
             rc.deadband_raw = 4;
+            break;
+        case RC_PROTO_PPM:
+            rc.min_raw      = 1000;
+            rc.mid_raw      = 1500;
+            rc.max_raw      = 2000;
+            rc.deadband_raw = 10;
             break;
         default:
             rc.min_raw      = 1000;
@@ -191,7 +198,7 @@ int settings_validate(Settings& s) {
     fixed += clamp_u16(m.esc_idle_us, m.esc_min_us, m.esc_max_us);
 
     RcSettings& rc = s.rc;
-    if (rc.proto > RC_PROTO_SPEKTRUM) { rc.proto = RC_PROTO_NONE; fixed++; }
+    if (rc.proto > RC_PROTO_PPM) { rc.proto = RC_PROTO_NONE; fixed++; }
     if (rc.ch_pitch >= RC_MAX_CH) { rc.ch_pitch = 1; fixed++; }
     if (rc.ch_roll  >= RC_MAX_CH) { rc.ch_roll  = 0; fixed++; }
     if (rc.ch_throttle >= RC_MAX_CH) { rc.ch_throttle = 2; fixed++; }

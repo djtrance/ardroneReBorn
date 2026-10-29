@@ -17,6 +17,16 @@
 | ¿El módulo 4in1 la reenvía a EdgeTX? | **SÍ.** El Multi manda a EdgeTX: `type 0x02` (FrSky S.Port), `0x03` (FrSky Hub), `0x04` (Spektrum), `0x06` (FlySky AFHDS2A). |
 | ¿Datos propios (nuestros)? | **SÍ con FrSky** (IDs DIY `0x5000–0x52FF`). Parcialmente con Spektrum. No con FlySky. |
 
+### RC input transport note (firmware)
+
+The receiver may feed the ESP32 using SBUS or Spektrum serial on UART2, or
+**PPM-SUM on GPIO33** when the receiver provides that output. PPM is only an
+RC input format — it carries **no telemetry back**. Its advantage here is
+that UART2 remains available for a MAVLink telemetry radio (`mv_uart=2`, e.g.
+TX GPIO23 / RX GPIO18); the receiver's PPM output remains independent. The
+firmware portal selects the input protocol. PPM frame limits and its lack of
+an in-band failsafe bit are documented in [`wiring.md`](wiring.md) §5.3.
+
 ```mermaid
 flowchart LR
     subgraph AIR["Aire"]

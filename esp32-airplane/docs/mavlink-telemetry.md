@@ -21,7 +21,7 @@
 |----------|--------|
 | ¿Qué hablamos? | **MAVLink 2.0** (magic `0xFD`), sin firma (signing), sin param protocol, sin comandos. Telemetría de salida + `REQUEST_DATA_STREAM` de entrada — lo mínimo para que QGC muestre el avión en vivo. |
 | ¿Por qué una implementación propia? | Cero dependencias: el firmware no arrastra la librería MAVLink (millares de archivos generados). El encoder se **compara byte a byte** contra frames dorado de `pymavlink` en los tests → misma salida, ~300 líneas. |
-| ¿Puerto configurable? | SÍ: UART0 (USB), UART1 (GPS) o UART2 (RC), baudios 9600–921600, rate rápido 1–25 Hz, sysid — todo en el portal (`mv_*`). |
+| ¿Puerto configurable? | SÍ: UART0 (USB), UART1 (GPS) o UART2 (SBUS/Spektrum RC; PPM en GPIO33 queda independiente), baudios 9600–921600, rate rápido 1–25 Hz, sysid — todo en el portal (`mv_*`). |
 | ¿El CSV serial sigue? | Solo si MAVLink **no** está en UART0. En UART0 el binario y el CSV no caben juntos en la misma línea → el CSV pasa a su sink UDP (`:5005`) y QGC se lleva el USB. |
 | ¿Telemetría al TX16S? | **No esto** — eso es S.Port/FPort por el enlace RC ([`rc-and-telemetry.md`](rc-and-telemetry.md)). Este doc es el enlace GCS (laptop/tablet). |
 
@@ -123,7 +123,7 @@ flowchart TB
 
     U0 --> O0["✅ CSV serial se apaga<br/>(el logger sigue por UDP :5005)<br/>QGC directo por USB<br/>TX/RX pin = default"]
     U1 --> O1["⚠️ GPS deshabilitado<br/>esta sesión (sin fix →<br/>sin armar, sin RTH)<br/>requiere mv_tx/mv_rx"]
-    U2 --> O2["⚠️ RC deshabilitado<br/>esta sesión (rc_service off →<br/>rc_ok=false → preflight falla)<br/>requiere mv_tx/mv_rx"]
+    U2 --> O2["UART2 RC serial off<br/>SBUS/Spektrum: rc_ok=false → preflight fails<br/>PPM GPIO33 remains active<br/>requires mv_tx/mv_rx"]
 
     style O0 fill:#e8f5e9
     style O1 fill:#fff3e0
@@ -137,8 +137,10 @@ Rules wired in `esp32_airplane.ino`:
   `capture.py --udp 192.168.4.1:5005`.
 - **UART1**: `gps_init()`/`gps_poll()` skipped → no fix (arming preflight
   blocks; RTH unavailable). Log lines in `setup()` say so.
-- **UART2**: `rc_uart_init()`/`rc_service()` skipped → `g_rc_ok=false` →
-  preflight fails; if already armed the RC-loss failsafe path runs.
+- **UART2**: SBUS/Spektrum serial RC is skipped → `g_rc_ok=false` →
+  preflight fails; if already armed the RC-loss failsafe path runs. PPM-SUM
+  is captured independently on GPIO33 and remains active while UART2 carries
+  MAVLink (select PPM in the portal; see `docs/wiring.md` §5.3).
 - `mav_uart_init()` runs **last** (boot and every portal save) so its
   `begin()` owns the pins; re-init restores GPS/RC when MAVLink is switched
   off again.
@@ -146,8 +148,8 @@ Rules wired in `esp32_airplane.ino`:
   any UART to any pin, but picking them is the pilot's job — without them
   MAVLink stays off with a portal-visible warning.
 
-> **⚠️ Don't flip `mv_uart` while armed.** Taking UART2 mid-flight means RC
-> loss by design; taking UART1 means no GPS.
+> **⚠️ Don't flip `mv_uart` while armed.** Taking UART2 mid-flight loses
+> SBUS/Spektrum RC; PPM on GPIO33 is independent. Taking UART1 means no GPS.
 
 ## 5. Portal fields
 

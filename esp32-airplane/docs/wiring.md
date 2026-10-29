@@ -14,12 +14,12 @@ graph LR
         direction TB
         U0["UART0 · GPIO1 TX / GPIO3 RX<br/>USB console + CSV + MAVLink"]
         U1["UART1 · GPIO13 RX / GPIO14 TX<br/>GPS"]
-        U2["UART2 · GPIO16 RX / GPIO17 TX<br/>RC in · S.Port out"]
+        U2["UART2 · GPIO16 RX / GPIO17 TX<br/>SBUS/Spektrum RC · MAVLink"]
         I2C["I2C · GPIO21 SDA / GPIO22 SCL<br/>IMU board"]
         PWM["LEDC · GPIO25/26/27<br/>50 Hz, 1000–2000 µs"]
         RX34["GPIO34 RX (input-only)<br/>LiDAR"]
         RX35["GPIO35 RX (input-only)<br/>Radar"]
-        PPM["GPIO33 (proposed, not implemented)<br/>PPM sum RC input"]
+        PPM["GPIO33<br/>PPM-SUM RC input"]
         ADC1["GPIO32 (ADC1)<br/>VBAT divider"]
         IO["GPIO2 LED · GPIO4 buzzer<br/>GPIO15 S.Port (phase 2)"]
         SPI["GPIO18/19/23 (+5 CS)<br/>FREE — UART2 MAVLink pins<br/>(SPI never initialized)"]
@@ -27,8 +27,8 @@ graph LR
 
     USB["PC / QGC<br/>via CP210x"] <--> U0
     GPSM["u-blox NEO-6M<br/>GPS module"] <--> U1
-    RCX["RC receiver<br/>SBUS / Spektrum"] --> U2
-    RCX -. "alternative: PPM-SUM" .-> PPM
+    RCX["RC receiver<br/>SBUS / Spektrum / PPM-SUM"] --> U2
+    RCX -. "PPM-SUM mode" .-> PPM
     SPORTM["FrSky S.Port<br/>phase 2 — 1N4148"] <--> U2
     IMUB["GY-87 / GY-91<br/>MPU + baro (+mag)"] <--> I2C
     ESCM["ESC + BEC 5V"] --- PWM
@@ -67,7 +67,7 @@ silkscreen of your board** — clones differ in order.
   34 ◄  │  [ ] 34  ── LiDAR TX            [ ]  3 ◄│── CP210x TX  (USB)
   35 ◄  │  [ ] 35  ── radar TX            [ ] 21 ◄│── I2C SDA → IMU board
   32 ◄  │  [ ] 32  ── VBAT divider        [ ] GND │
-  33 ◄  │  [ ] 33  ── PPM SUM (proposed)  [ ] 19  │ libre (SPI no existe)
+  33 ◄  │  [ ] 33  ── PPM SUM (input)    [ ] 19  │ MAVLink RX (if used)
   25 ◄  │  [ ] 25  ── elevon L servo      [ ] 18  │ libre (SPI no existe)
   26 ◄  │  [ ] 26  ── elevon R servo      [ ]  5  │ strapping — dejar libre
   27 ◄  │  [ ] 27  ── ESC throttle        [ ] 17 ◄│── S.Port out (phase 2)
@@ -92,8 +92,8 @@ silkscreen of your board** — clones differ in order.
 | 3  | RX | UART0 ← CP210x TX | same |
 | 13 | RX | UART1 ← GPS TX | u-blox NEO-6M NMEA/UBX @115200 after probe — *or* MAVLink `mv_uart=1`, `mv_rx=13` (GPS then disabled) |
 | 14 | TX | UART1 → GPS RX | UBX-CFG-PRT baud change (never left muted) — *or* MAVLink `mv_uart=1`, `mv_tx=14` |
-| 16 | RX | UART2 ← receiver | SBUS (inverted) / Spektrum / FPort data — *or* MAVLink `mv_uart=2`, `mv_rx=16` (RC then disabled) |
-| 17 | TX | UART2 → receiver | S.Port telemetry out (phase 2) — *or* MAVLink `mv_uart=2`, `mv_tx=17` |
+| 16 | RX | UART2 ← receiver | SBUS (inverted) / Spektrum / FPort — or MAVLink `mv_uart=2`, `mv_rx=16` (serial RC then disabled) |
+| 17 | TX | UART2 → receiver | S.Port telemetry out (phase 2) — or MAVLink `mv_uart=2`, `mv_tx=17` |
 | 15 | TX | S.Port half-duplex | tie to RX17 side via **1N4148** — `docs/rc-and-telemetry.md` §3 |
 | 21 | I2C | SDA | IMU board (GY-87/GY-91), shared bus |
 | 22 | I2C | SCL | IMU board |
@@ -106,8 +106,8 @@ silkscreen of your board** — clones differ in order.
 | 2  | out | status LED | keep series R ≥ 1 kΩ (strapping pin) |
 | 4  | out | buzzer | optional |
 | 18/19/23 | SPI | **free** | `SPI.begin()` does not exist in the firmware — plain free GPIOs; suggested UART2 MAVLink RX/TX pins if PPM uses GPIO33 |
-| 5 | SPI CS | free, strapping | GPIO5 is a boot-strap pin — usable, but prefer 23/18/19 (33 is proposed for PPM) |
-| 33 | GPIO | **free / proposed PPM** | Unused today; suggested PPM-SUM input if implemented. Use for MAVLink only when not used by PPM. |
+| 5 | SPI CS | free, strapping | GPIO5 is a boot-strap pin — usable, but prefer 23/18/19 |
+| 33 | GPIO | **PPM-SUM input** | PPM protocol: rising-edge capture, GPIO interrupt. Dedicated to RC; do not use as MAVLink pin at the same time. |
 | 36/39 | input-only | free | VP/VN — no pull-ups, **`mv_rx` only** (cannot transmit) |
 
 ---
@@ -203,17 +203,17 @@ FPort (2-way):    receiver FPort ──┬──► GPIO16 (U2RX)
 - SBUS is inverted — firmware logs `[rc] SBUS ... inverted=1`.
 - Phase-2 telemetry to the radio: S.Port half-duplex on GPIO15/17 through the
   **1N4148** — full matrix in `docs/rc-and-telemetry.md` §3.
-- **Current firmware supports SBUS/Spektrum on UART2 only.** Selecting
-  MAVLink `mv_uart=2` currently disables RC and preflight blocks arming.
+- Firmware supports SBUS/Spektrum on UART2 and PPM-SUM on GPIO33. Selecting
+  MAVLink `mv_uart=2` disables SBUS/Spektrum, but leaves PPM RC active.
 
-#### Alternative under consideration: PPM sum input (frees UART2)
+#### PPM-SUM input (frees UART2)
 
 If the receiver has a **PPM-SUM output** (one pulse train carrying all RC
 channels; not a single-channel PWM output), it can connect to a GPIO input
 instead of UART2:
 
 ```
-Receiver PPM-SUM signal ─────────► ESP32 GPIO33 (proposed PPM input)
+Receiver PPM-SUM signal ─────────► ESP32 GPIO33 (PPM input)
 Receiver GND ────────────────────► ESP32 GND (common)
 Receiver VCC ────────────────────► 5 V BEC (per receiver spec)
 
@@ -223,17 +223,24 @@ ESP32 GPIO18 (RX) ◄─────────────── telemetry rad
 ESP32 GND ──────────────────────── common GND
 ```
 
-**This is a wiring proposal, not supported by the current firmware yet.**
-PPM needs a pulse-width/frame-sync decoder, channel-count validation, timeout
-failsafe, portal protocol selection and host tests. Once implemented, RC on
-GPIO33 will not own UART2, so `mv_uart=2` can carry MAVLink without taking RC
-off the air; GPS remains on UART1. Do not select `mv_uart=2` for flight until
-that PPM path is implemented and bench-validated with props removed.
+**Firmware support is implemented**: choose `PPM-SUM (GPIO33)` in the WiFi
+portal. It captures rising-edge intervals; accepted channels are 750–2250 µs,
+the sync interval is 3–30 ms, and a frame must contain at least 5 (up to 16)
+channels. The existing RC loss timeout applies. PPM on GPIO33 does not own
+UART2, so `mv_uart=2` can carry MAVLink while PPM remains active; GPS stays on
+UART1. **Still bench-validate with props removed before flight.**
 
 Check the receiver manual first: some receivers expose only SBUS/serial and
 do not provide PPM-SUM. PPM voltage must be ESP32-safe (3.3 V); if the output
-is 5 V, use a level shifter or a correctly sized divider. GPIO33 is suggested
-because it is currently free and supports input; don't share it with MAVLink.
+is 5 V, use a level shifter or a correctly sized divider. GPIO33 is dedicated
+to PPM when selected; don't share it with MAVLink. **PPM has no in-band
+failsafe flag**: program the receiver's failsafe to disarm + minimum throttle;
+if the receiver keeps sending PPM pulses on signal loss, the firmware cannot
+distinguish that from valid RC. The timeout catches only a stopped pulse train.
+The decoder accepts ≥5 channels, but the default channel map uses channels
+0–6 (sticks + arm/RTH/flight-mode); with a shorter receiver, set unused
+`ch_rth`/`ch_fm` to `255` in the portal. Frames missing any still-mapped
+channel are rejected, so a missing arm switch cannot become a valid frame.
 
 ### 5.4 PWM — ESC + elevon servos (B3)
 
@@ -271,14 +278,14 @@ MAVLink on the same UART abstraction, checklist I1 extension).
 |-----------|-----------|----|----|------|------------------------|
 | `0` (default) | UART0 | **GPIO1** | **GPIO3** | fixed (USB) | CSV serial → moves to UDP `:5005` |
 | `1` | UART1 | **`mv_tx` (required)** | **`mv_rx` (required)** | any GPIO | **GPS disabled** (`gps_init`/poll skipped) |
-| `2` | UART2 | **`mv_tx` (required)** | **`mv_rx` (required)** | any GPIO | **Current:** UART2 RC disabled → preflight blocks. **After PPM support:** RC on GPIO33 can remain active. |
+| `2` | UART2 | **`mv_tx` (required)** | **`mv_rx` (required)** | any GPIO | **SBUS/Spektrum:** RC disabled → preflight blocks. **PPM GPIO33:** RC remains active. |
 
 ```mermaid
 graph LR
     MV["MAVLink v2 stream<br/>portal mv_en=1"] --> Q{"mv_uart"}
     Q -->|"0"| O0["UART0 · fixed<br/>GPIO1 TX / GPIO3 RX<br/>USB → QGC / QGC serial"]
     Q -->|"1"| O1["UART1 · pins REQUIRED<br/>mv_tx / mv_rx (any GPIO)<br/>⚠ GPS off this session"]
-    Q -->|"2"| O2["UART2 · pins REQUIRED<br/>mv_tx / mv_rx (any GPIO)<br/>⚠ current: RC off<br/>future PPM GPIO: RC stays on"]
+    Q -->|"2"| O2["UART2 · pins REQUIRED<br/>mv_tx / mv_rx (any GPIO)<br/>SBUS/Spektrum RC off<br/>PPM GPIO33 stays active"]
     O0 --> W0["CSV logger to UDP<br/>capture.py --udp"]
     O1 --> W1["wire TX→GCS RX,<br/>common GND"]
     O2 --> W2["RC receiver signal<br/>is unplugged"]
@@ -286,20 +293,22 @@ graph LR
 
 - **The conflict is the UART *peripheral*, not the GPIOs** — choosing
   `mv_uart=1` takes `Serial1` from the GPS even if `mv_tx/mv_rx` point at
-  other pins. Today UART2 also belongs to RC (`rc_uart_init()` is skipped);
-  a future PPM input on GPIO33 would decouple RC from UART2.
+  other pins. UART2 takes SBUS/Spektrum RC (`rc_uart_init()` is skipped),
+  but the PPM decoder is a GPIO interrupt and remains active independently.
 - **uart1/2 without pins = MAVLink stays OFF** with
   `[mav] UART1/2 needs TX+RX pins` on the console. Recommended wiring so no
-  harness changes: `mv_uart=1` → `mv_tx=14, mv_rx=13` (reuse the GPS wires);
-  `mv_uart=2` → `mv_tx=17, mv_rx=16` (reuse the RC wires).
+  harness changes: `mv_uart=1` → `mv_tx=14, mv_rx=13` (reuse GPS wires);
+  `mv_uart=2` can reuse 17/16 only if intentionally replacing SBUS/Spektrum.
+  With PPM on GPIO33, prefer `mv_tx=23, mv_rx=18` so UART2 stays physically
+  separate from the receiver wiring.
 - **Which GPIOs to use?** The best dedicated-telemetry pins are **GPIO23**
   and **GPIO18/19** (the "SPI" group is never initialized:
   `SPI.begin()` does not exist in the firmware), or `GPIO36/39` for
   `mv_rx` only (input-only). **Never GPIO21/22** — that is the IMU's I2C
   bus (`Wire.begin(21,22)`): losing SCL means losing accel + baro, so the
   aircraft can never arm. GPS still conflicts with UART1 regardless of pin
-  choice. UART2 is a candidate for a dedicated telemetry radio (SiK/ELRS);
-  **PPM support is required first** if RC is to remain active on that airframe.
+  choice. UART2 can now host a dedicated telemetry radio (SiK/ELRS) with RC
+  still active when the receiver is configured for PPM-SUM on GPIO33.
 - `mv_baud` clamps 9600–921600 (default 57600); rate `mv_rate` 1–25 Hz;
   don't flip `mv_uart` while armed. QGC recipe:
   `docs/mavlink-telemetry.md`.
@@ -328,12 +337,15 @@ graph TB
     subgraph alloc["UART ownership"]
         A0["UART0 · GPIO1/3<br/>USB — boot · CSV · MAVLink"]
         A1["UART1 · GPIO13/14<br/>GPS NEO-6M 9600→115200 · 5 Hz"]
-        A2["UART2 · GPIO16/17<br/>RC in (SBUS/Spektrum/FPort) · S.Port out"]
-        A3["GPIO34 / GPIO35<br/>TFmini / LD2450 — read-only"]
+    A2["UART2 · GPIO16/17<br/>RC serial (SBUS/Spektrum) or MAVLink"]
+    AP["GPIO33<br/>PPM-SUM RC input"]
+    A3["GPIO34 / GPIO35<br/>TFmini / LD2450 — read-only"]
     end
+    RX["RC receiver"] -->|"SBUS/Spektrum"| A2
+    RX -->|"PPM-SUM"| AP
     A0 ---|mv_uart=0| M0["MAVLink owns it → CSV to UDP"]
     A1 ---|mv_uart=1| M1["⚠ GPS skipped"]
-    A2 ---|mv_uart=2| M2["⚠ RC skipped → preflight blocks"]
+    A2 ---|mv_uart=2| M2["SBUS/Spektrum skipped;<br/>PPM GPIO33 stays active"]
 ```
 
 Never flip `mv_uart` while armed (`docs/mavlink-telemetry.md`).
@@ -362,6 +374,12 @@ Never flip `mv_uart` while armed (`docs/mavlink-telemetry.md`).
 - [ ] GPS TX on **GPIO13**: `init:` shows `gps=1@115200`; no NMEA appears on
       the USB console
 - [ ] RC: CSV `raw_p/raw_r` move with the sticks; `rc_ok=1`
+- [ ] If using PPM: choose `PPM-SUM (GPIO33)` in portal; check ≥5 channels,
+      channel order/range and arm switch; loss-of-signal behavior verified
+      with the receiver's failsafe programmed to disarm + minimum throttle
+- [ ] If using MAVLink UART2 with PPM: `mv_tx=23`, `mv_rx=18`; confirm RC
+      stays `rc_ok=1` while MAVLink frames flow. Do not do this with SBUS/
+      Spektrum selected — UART2 would take their RC input away.
 - [ ] Servos: passthrough ON (portal) → stick moves the surface; direction
       per the D1 table
 - [ ] ESC: throttle at min arms only with `armed=1` in the CSV

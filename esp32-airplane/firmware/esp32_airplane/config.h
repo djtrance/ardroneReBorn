@@ -91,11 +91,12 @@
 #define PIN_STATUS_LED          2
 #define PIN_BUZZER              4       // optional (I5)
 
-// --- RC input (H2) — SBUS or Spektrum satellite -----------------------------
-// Phase 1 flies on RC only, so this UART must stay free of conflicts.
-// UART2 is used for RC (not GPS) because SBUS is an inverted input.
+// --- RC input (H2) — SBUS/Spektrum on UART2 or PPM-SUM on GPIO33 ------------
+// UART2 carries SBUS/Spektrum because SBUS is an inverted serial input.
+// PPM-SUM is captured on a GPIO interrupt and leaves UART2 free for MAVLink.
 #define PIN_RC_RX               16      // UART2 RX  <- receiver SBUS/Spektrum
 #define PIN_RC_TX               17      // UART2 TX  -> S.Port telemetry (phase 2)
+#define PIN_RC_PPM              33      // GPIO edge input <- receiver PPM-SUM
 #define PIN_RC_INPUT            PIN_RC_RX   // back-compat alias
 
 // --- Telemetry to the RC radio (docs/rc-and-telemetry.md) -------------------

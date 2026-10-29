@@ -49,11 +49,12 @@ struct MixSettings {
 };
 
 // ---------------------------------------------------------------------------
-// RC input (checklist H2) — SBUS or Spektrum satellite
+// RC input (checklist H2) — SBUS, Spektrum satellite, or PPM sum
 // ---------------------------------------------------------------------------
 #define RC_PROTO_NONE       0
 #define RC_PROTO_SBUS       1
 #define RC_PROTO_SPEKTRUM   2
+#define RC_PROTO_PPM        3       // PPM-SUM pulse train on PIN_RC_PPM
 
 struct RcSettings {
     uint8_t  proto;                    // RC_PROTO_*
@@ -121,8 +122,8 @@ struct TelemSettings {
 // ---------------------------------------------------------------------------
 // MAVLink telemetry over a configurable serial port (checklist I1)
 //
-// The ESP32 has three UARTs and all three are spoken for (0 = USB, 1 = GPS,
-// 2 = RC receiver), so picking a port means picking whose port to borrow —
+// UART0 = USB, UART1 = GPS, UART2 = SBUS/Spektrum RC. PPM RC is on GPIO33 and
+// leaves UART2 free. Picking an occupied UART means borrowing that peripheral —
 // docs/mavlink-telemetry.md has the conflict table. Default is OFF on
 // UART0, which keeps the aircraft reachable from QGroundControl over USB
 // while the CSV logger moves to its UDP sink.

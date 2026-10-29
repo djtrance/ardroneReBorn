@@ -424,7 +424,7 @@ small{color:#7b8ea5}
 <section><h2>RC entrada (H2)</h2><div class=grid>
 <div><label>Protocolo</label><select name=proto>
 <option value=0>NINGUNO</option><option value=1>SBUS</option>
-<option value=2>Spektrum</option></select></div>
+<option value=2>Spektrum</option><option value=3>PPM-SUM (GPIO33)</option></select></div>
 <div><label>Ch pitch</label><input name=ch_p type=number min=0 max=15></div>
 <div><label>Ch roll</label><input name=ch_r type=number min=0 max=15></div>
 <div><label>Ch throttle</label><input name=ch_t type=number min=0 max=15></div>
@@ -438,7 +438,8 @@ small{color:#7b8ea5}
 <label for=arm_high>ARM en alto</label></div>
 <div class=chk><input name=sbus_inv id=sbus_inv type=checkbox>
 <label for=sbus_inv>SBUS invertido</label></div>
-</div></section>
+</div><small>PPM-SUM: señal del receptor a GPIO33 (3.3 V máx.), mínimo 5 canales;
+sin flag failsafe en banda, depende del timeout RC.</small></section>
 
 <section><h2>WiFi</h2><div class=grid>
 <div><label>SSID</label><input name=ssid maxlength=32></div>
@@ -461,7 +462,7 @@ docs/rc-and-telemetry.md</small></section>
 <div><label>Puerto UART</label><select name=mv_uart>
 <option value=0>0 &mdash; USB (CSV serial a UDP)</option>
 <option value=1>1 &mdash; GPS (roba GPS)</option>
-<option value=2>2 &mdash; RC (roba receptor)</option></select></div>
+<option value=2>2 &mdash; RC UART (roba SBUS/Spektrum)</option></select></div>
 <div><label>Baudios</label><select name=mv_baud>
 <option value=9600>9600</option><option value=57600>57600</option>
 <option value=115200>115200</option><option value=230400>230400</option>
@@ -472,8 +473,9 @@ docs/rc-and-telemetry.md</small></section>
 <div><label>TX pin (-1=def)</label><input name=mv_tx type=number min=-1 max=39></div>
 <div><label>RX pin (-1=def)</label><input name=mv_rx type=number min=-1 max=39></div>
 <div class=chk><input name=mv_en id=mv_en type=checkbox><label for=mv_en>Activar MAVLink</label></div>
-</div><small>UART 1/2 exigen TX+RX pin y desactivan GPS/RC. Con MAVLink en
-UART0 el CSV serial se apaga (use capture.py --udp). Ver
+</div><small>UART 1/2 exigen TX+RX pin. UART1 desactiva GPS; UART2 desactiva
+SBUS/Spektrum, pero PPM en GPIO33 sigue activo. Con MAVLink en UART0 el CSV
+serial se apaga (use capture.py --udp). Ver
 docs/mavlink-telemetry.md</small></section>
 
 <button type=submit>GUARDAR</button>
