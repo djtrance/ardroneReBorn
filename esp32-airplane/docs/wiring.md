@@ -19,14 +19,16 @@ graph LR
         PWM["LEDC · GPIO25/26/27<br/>50 Hz, 1000–2000 µs"]
         RX34["GPIO34 RX (input-only)<br/>LiDAR"]
         RX35["GPIO35 RX (input-only)<br/>Radar"]
+        PPM["GPIO33 (proposed, not implemented)<br/>PPM sum RC input"]
         ADC1["GPIO32 (ADC1)<br/>VBAT divider"]
         IO["GPIO2 LED · GPIO4 buzzer<br/>GPIO15 S.Port (phase 2)"]
-        SPI["GPIO18/19/23 (+5 CS)<br/>FREE — ideal para MAVLink mv_tx/mv_rx<br/>(SPI nunca se inicializa)"]
+        SPI["GPIO18/19/23 (+5 CS)<br/>FREE — UART2 MAVLink pins<br/>(SPI never initialized)"]
     end
 
     USB["PC / QGC<br/>via CP210x"] <--> U0
     GPSM["u-blox NEO-6M<br/>GPS module"] <--> U1
     RCX["RC receiver<br/>SBUS / Spektrum"] --> U2
+    RCX -. "alternative: PPM-SUM" .-> PPM
     SPORTM["FrSky S.Port<br/>phase 2 — 1N4148"] <--> U2
     IMUB["GY-87 / GY-91<br/>MPU + baro (+mag)"] <--> I2C
     ESCM["ESC + BEC 5V"] --- PWM
@@ -59,13 +61,13 @@ silkscreen of your board** — clones differ in order.
    EN   │  [ ] ESP32 DevKit            [ ] EN/RST  │
         │                                          │
  3V3    │  [ ] 3V3                         [ ] GND │
-  GND   │  [ ] GND                         [ ] 23 ◄│── LIBRE — MAVLink OK
+  GND   │  [ ] GND                         [ ] 23 ◄│── MAVLink TX (if used)
         │  [ ] VP(36)                      [ ] 22 ◄│── I2C SCL (IMU) — never
         │  [ ] VN(39)      UART0 ───►      [ ]  1 ◄│── CP210x RX  (USB)
   34 ◄  │  [ ] 34  ── LiDAR TX            [ ]  3 ◄│── CP210x TX  (USB)
   35 ◄  │  [ ] 35  ── radar TX            [ ] 21 ◄│── I2C SDA → IMU board
   32 ◄  │  [ ] 32  ── VBAT divider        [ ] GND │
-  33 ◄  │  [ ] 33  ── LIBRE (MAVLink OK)  [ ] 19  │ libre (SPI no existe)
+  33 ◄  │  [ ] 33  ── PPM SUM (proposed)  [ ] 19  │ libre (SPI no existe)
   25 ◄  │  [ ] 25  ── elevon L servo      [ ] 18  │ libre (SPI no existe)
   26 ◄  │  [ ] 26  ── elevon R servo      [ ]  5  │ strapping — dejar libre
   27 ◄  │  [ ] 27  ── ESC throttle        [ ] 17 ◄│── S.Port out (phase 2)
@@ -103,9 +105,9 @@ silkscreen of your board** — clones differ in order.
 | 32 | ADC | battery sense | divider from LiPo (B4 — value TODO, calibrate) |
 | 2  | out | status LED | keep series R ≥ 1 kΩ (strapping pin) |
 | 4  | out | buzzer | optional |
-| 18/19/23 | SPI | **free** | `SPI.begin()` does not exist in the firmware — 18/19/23 are plain free GPIOs, **ideal for MAVLink `mv_tx`/`mv_rx`** (kept "reserved" only for a hypothetical SPI IMU) |
-| 5 | SPI CS | free, strapping | GPIO5 is a boot-strap pin — usable, but prefer 23/33 |
-| 33 | GPIO | **free** | unused anywhere — **ideal for MAVLink `mv_tx`/`mv_rx`** |
+| 18/19/23 | SPI | **free** | `SPI.begin()` does not exist in the firmware — plain free GPIOs; suggested UART2 MAVLink RX/TX pins if PPM uses GPIO33 |
+| 5 | SPI CS | free, strapping | GPIO5 is a boot-strap pin — usable, but prefer 23/18/19 (33 is proposed for PPM) |
+| 33 | GPIO | **free / proposed PPM** | Unused today; suggested PPM-SUM input if implemented. Use for MAVLink only when not used by PPM. |
 | 36/39 | input-only | free | VP/VN — no pull-ups, **`mv_rx` only** (cannot transmit) |
 
 ---
@@ -201,8 +203,37 @@ FPort (2-way):    receiver FPort ──┬──► GPIO16 (U2RX)
 - SBUS is inverted — firmware logs `[rc] SBUS ... inverted=1`.
 - Phase-2 telemetry to the radio: S.Port half-duplex on GPIO15/17 through the
   **1N4148** — full matrix in `docs/rc-and-telemetry.md` §3.
-- UART conflicts: enabling MAVLink on `mv_uart=2` **kills RC** (preflight
-  then blocks arming — by design).
+- **Current firmware supports SBUS/Spektrum on UART2 only.** Selecting
+  MAVLink `mv_uart=2` currently disables RC and preflight blocks arming.
+
+#### Alternative under consideration: PPM sum input (frees UART2)
+
+If the receiver has a **PPM-SUM output** (one pulse train carrying all RC
+channels; not a single-channel PWM output), it can connect to a GPIO input
+instead of UART2:
+
+```
+Receiver PPM-SUM signal ─────────► ESP32 GPIO33 (proposed PPM input)
+Receiver GND ────────────────────► ESP32 GND (common)
+Receiver VCC ────────────────────► 5 V BEC (per receiver spec)
+
+Then UART2 is available for MAVLink:
+ESP32 GPIO23 (TX) ───────────────► telemetry radio / GCS RX
+ESP32 GPIO18 (RX) ◄─────────────── telemetry radio / GCS TX
+ESP32 GND ──────────────────────── common GND
+```
+
+**This is a wiring proposal, not supported by the current firmware yet.**
+PPM needs a pulse-width/frame-sync decoder, channel-count validation, timeout
+failsafe, portal protocol selection and host tests. Once implemented, RC on
+GPIO33 will not own UART2, so `mv_uart=2` can carry MAVLink without taking RC
+off the air; GPS remains on UART1. Do not select `mv_uart=2` for flight until
+that PPM path is implemented and bench-validated with props removed.
+
+Check the receiver manual first: some receivers expose only SBUS/serial and
+do not provide PPM-SUM. PPM voltage must be ESP32-safe (3.3 V); if the output
+is 5 V, use a level shifter or a correctly sized divider. GPIO33 is suggested
+because it is currently free and supports input; don't share it with MAVLink.
 
 ### 5.4 PWM — ESC + elevon servos (B3)
 
@@ -240,14 +271,14 @@ MAVLink on the same UART abstraction, checklist I1 extension).
 |-----------|-----------|----|----|------|------------------------|
 | `0` (default) | UART0 | **GPIO1** | **GPIO3** | fixed (USB) | CSV serial → moves to UDP `:5005` |
 | `1` | UART1 | **`mv_tx` (required)** | **`mv_rx` (required)** | any GPIO | **GPS disabled** (`gps_init`/poll skipped) |
-| `2` | UART2 | **`mv_tx` (required)** | **`mv_rx` (required)** | any GPIO | **RC disabled → preflight blocks arming** |
+| `2` | UART2 | **`mv_tx` (required)** | **`mv_rx` (required)** | any GPIO | **Current:** UART2 RC disabled → preflight blocks. **After PPM support:** RC on GPIO33 can remain active. |
 
 ```mermaid
 graph LR
     MV["MAVLink v2 stream<br/>portal mv_en=1"] --> Q{"mv_uart"}
     Q -->|"0"| O0["UART0 · fixed<br/>GPIO1 TX / GPIO3 RX<br/>USB → QGC / QGC serial"]
     Q -->|"1"| O1["UART1 · pins REQUIRED<br/>mv_tx / mv_rx (any GPIO)<br/>⚠ GPS off this session"]
-    Q -->|"2"| O2["UART2 · pins REQUIRED<br/>mv_tx / mv_rx (any GPIO)<br/>⚠ RC off → can't arm"]
+    Q -->|"2"| O2["UART2 · pins REQUIRED<br/>mv_tx / mv_rx (any GPIO)<br/>⚠ current: RC off<br/>future PPM GPIO: RC stays on"]
     O0 --> W0["CSV logger to UDP<br/>capture.py --udp"]
     O1 --> W1["wire TX→GCS RX,<br/>common GND"]
     O2 --> W2["RC receiver signal<br/>is unplugged"]
@@ -255,19 +286,20 @@ graph LR
 
 - **The conflict is the UART *peripheral*, not the GPIOs** — choosing
   `mv_uart=1` takes `Serial1` from the GPS even if `mv_tx/mv_rx` point at
-  other pins; same for UART2 vs the RC link (`rc_uart_init()` is skipped).
+  other pins. Today UART2 also belongs to RC (`rc_uart_init()` is skipped);
+  a future PPM input on GPIO33 would decouple RC from UART2.
 - **uart1/2 without pins = MAVLink stays OFF** with
   `[mav] UART1/2 needs TX+RX pins` on the console. Recommended wiring so no
   harness changes: `mv_uart=1` → `mv_tx=14, mv_rx=13` (reuse the GPS wires);
   `mv_uart=2` → `mv_tx=17, mv_rx=16` (reuse the RC wires).
 - **Which GPIOs to use?** The best dedicated-telemetry pins are **GPIO23**
-  and **GPIO33** (plus 18/19 — the "SPI" group is never initialized:
+  and **GPIO18/19** (the "SPI" group is never initialized:
   `SPI.begin()` does not exist in the firmware), or `GPIO36/39` for
   `mv_rx` only (input-only). **Never GPIO21/22** — that is the IMU's I2C
   bus (`Wire.begin(21,22)`): losing SCL means losing accel + baro, so the
-  aircraft can never arm. The GPS/RC conflict stands regardless of the pins
-  chosen, so uart1/2 makes sense as a **dedicated telemetry radio**
-  (SiK/ELRS telemetry) on its own connector.
+  aircraft can never arm. GPS still conflicts with UART1 regardless of pin
+  choice. UART2 is a candidate for a dedicated telemetry radio (SiK/ELRS);
+  **PPM support is required first** if RC is to remain active on that airframe.
 - `mv_baud` clamps 9600–921600 (default 57600); rate `mv_rate` 1–25 Hz;
   don't flip `mv_uart` while armed. QGC recipe:
   `docs/mavlink-telemetry.md`.
