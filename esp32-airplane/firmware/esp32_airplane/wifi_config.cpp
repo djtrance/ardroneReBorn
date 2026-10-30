@@ -405,6 +405,8 @@ color:#fff;font-size:16px;font-weight:700;text-decoration:none;
 text-align:center;margin-bottom:14px}
 #msg{margin:10px 2px;font-size:13px;min-height:18px}
 small{color:#7b8ea5}
+.help{display:block;color:#9fb0c3;line-height:1.5;margin-top:8px}
+.help b{color:#dfe6ee}.help code{color:#7fd1ff}
 </style></head><header>WING &mdash; configuration</header><main>
 <a class=btn href=/attitude>&#9673; VISOR DE ACTITUD (IMU) &rarr;</a>
 <form id=f>
@@ -438,8 +440,14 @@ small{color:#7b8ea5}
 <label for=arm_high>ARM en alto</label></div>
 <div class=chk><input name=sbus_inv id=sbus_inv type=checkbox>
 <label for=sbus_inv>SBUS invertido</label></div>
-</div><small>PPM-SUM: señal del receptor a GPIO33 (3.3 V máx.), mínimo 5 canales;
-sin flag failsafe en banda, depende del timeout RC.</small></section>
+</div><small class=help><b>PPM-SUM — cableado:</b> solo si el receptor tiene salida
+PPM-SUM (no PWM individual): <code>SUM/PPM → GPIO33</code>, <code>GND → GND</code>,
+VCC del receptor según su manual (normalmente BEC 5 V). La señal GPIO33 no debe
+superar 3.3 V; si entrega 5 V, usa level shifter/divisor. Selecciona PPM-SUM aquí.
+El decoder admite 5–16 canales; el mapa default usa CH0–CH6, así que para un RX de
+5 canales pon Ch RTH y Ch modo de vuelo en <code>255</code>. PPM no lleva flag de
+failsafe: configura el RX para ARM desactivado + throttle mínimo si pierde señal;
+si sigue emitiendo pulsos no se detecta la pérdida. Prueba con hélices quitadas.</small></section>
 
 <section><h2>WiFi</h2><div class=grid>
 <div><label>SSID</label><input name=ssid maxlength=32></div>
@@ -473,9 +481,12 @@ docs/rc-and-telemetry.md</small></section>
 <div><label>TX pin (-1=def)</label><input name=mv_tx type=number min=-1 max=39></div>
 <div><label>RX pin (-1=def)</label><input name=mv_rx type=number min=-1 max=39></div>
 <div class=chk><input name=mv_en id=mv_en type=checkbox><label for=mv_en>Activar MAVLink</label></div>
-</div><small>UART 1/2 exigen TX+RX pin. UART1 desactiva GPS; UART2 desactiva
-SBUS/Spektrum, pero PPM en GPIO33 sigue activo. Con MAVLink en UART0 el CSV
-serial se apaga (use capture.py --udp). Ver
+</div><small class=help><b>MAVLink UART2 + RC por PPM:</b> elige Puerto UART=2 y conecta
+<code>GPIO23 TX → RX</code> de la radio/GCS, <code>GPIO18 RX ← TX</code> de la radio/GCS,
+con GND común. Ajusta TX pin=<code>23</code>, RX pin=<code>18</code>; el receptor PPM
+permanece en GPIO33. No uses UART2 así con SBUS/Spektrum: ese RC quedaría desconectado.
+UART 1/2 exigen TX+RX pin; UART1 desactiva GPS. Con MAVLink en UART0 el CSV
+serial se apaga (usa capture.py --udp). Señal serie ESP32 = 3.3 V. Ver
 docs/mavlink-telemetry.md</small></section>
 
 <button type=submit>GUARDAR</button>
